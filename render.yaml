@@ -1,0 +1,35 @@
+services:
+  # Python Flask Backend
+  - type: web
+    name: ai-study-tutor-backend
+    env: docker
+    dockerfilePath: backend/Dockerfile
+    dockerContextDir: backend
+    plan: free
+    envVars:
+      - key: FLASK_ENV
+        value: production
+      - key: DATABASE_URL
+        value: sqlite:////data/studytutor.db # persists in sqlite volume
+      - key: SECRET_KEY
+        generateValue: true
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: USE_LOCAL_MODELS
+        value: "false"
+    disk:
+      name: sqlite-data
+      mountPath: /data
+      sizeGB: 1
+
+  # Frontend static hosting
+  - type: web
+    name: ai-study-tutor-frontend
+    env: static
+    buildCommand: cd frontend && npm install && npm run build
+    publishPath: frontend/dist
+    plan: free
+    routes:
+      - type: rewrite
+        src: /*
+        dest: /index.html
