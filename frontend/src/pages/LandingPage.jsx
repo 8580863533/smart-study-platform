@@ -43,12 +43,10 @@ export default function LandingPage() {
         padding: '16px 32px',
         display: 'flex',
         alignItems: 'center',
-        justifyContent: 'between',
+        justifyContent: 'space-between',
         borderRadius: '24px',
         zIndex: 10,
-        position: 'relative',
-        display: 'flex',
-        justifyContent: 'space-between'
+        position: 'relative'
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           <div style={{
