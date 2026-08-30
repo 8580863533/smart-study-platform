@@ -12,6 +12,10 @@ progress_bp = Blueprint("progress", __name__)
 ai_service = AIService()
 
 @progress_bp.route("/dashboard", methods=["GET"])
+@progress_bp.route("/overview", methods=["GET"])
+@progress_bp.route("/weekly", methods=["GET"])
+@progress_bp.route("/score-history", methods=["GET"])
+@progress_bp.route("/flashcard-stats", methods=["GET"])
 @jwt_required()
 def get_dashboard():
     """

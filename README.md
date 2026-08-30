@@ -1,5 +1,13 @@
 # 🎓 Smart Study Platform — AI Study Tutor
 
+[![Live Demo](https://img.shields.io/badge/🌐_Live_Demo-24/7_Active-brightgreen?style=for-the-badge&logo=render)](https://8580863533.github.io/smart-study-platform/)
+[![GitHub Deployment](https://img.shields.io/badge/GitHub_Pages-Active-blue?style=for-the-badge&logo=github)](https://8580863533.github.io/smart-study-platform/)
+[![Backend Status](https://img.shields.io/badge/Backend_API-Online-purple?style=for-the-badge&logo=python)](https://ai-study-tutor-backend.onrender.com/api)
+
+> 🌐 **24/7 Active Live Demo**: [https://8580863533.github.io/smart-study-platform/](https://8580863533.github.io/smart-study-platform/)  
+> ⚡ **Cloud Service (Render)**: [https://smart-study-platform.onrender.com](https://smart-study-platform.onrender.com)  
+> 📡 **API Service Base**: `https://ai-study-tutor-backend.onrender.com/api`
+
 A full-stack, gamified AI-powered study assistant built to help students study smarter by summarizing notes, answering contextual questions, auto-generating active-recall flashcard decks, testing note mastery with circular timed quizzes, and auditing user security logs (login histories).
 
 ---

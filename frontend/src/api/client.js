@@ -26,7 +26,7 @@ axios.interceptors.response.use(
 
 // --- Axios Instance ---
 const client = axios.create({
-  baseURL: '/api',
+  baseURL: import.meta.env.VITE_API_BASE_URL || '/api',
   headers: { 'Content-Type': 'application/json' },
   timeout: 30000,
 });
@@ -78,9 +78,9 @@ export const documentsAPI = {
       headers: { 'Content-Type': 'multipart/form-data' },
       onUploadProgress,
     }),
-  uploadText: (title, content) => client.post('/documents/upload-text', { title, content }),
+  uploadText: (title, content) => client.post('/documents/upload', { title, content }),
   delete: (docId) => client.delete(`/documents/${docId}`),
-  stats: (docId) => client.get(`/documents/${docId}/stats`),
+  stats: (docId) => client.get(`/documents/${docId}`),
 };
 
 // --- Q&A API ---
@@ -91,35 +91,41 @@ export const qaAPI = {
 
 // --- Summarize API ---
 export const summarizeAPI = {
-  summarize: (docId) => client.post('/summarize', { document_id: docId }),
-  getSummary: (docId) => client.get(`/summarize/${docId}`),
+  summarize: (docId, options = {}) => client.post(`/summarize/${docId}`, options),
+  getSummary: (docId) => client.post(`/summarize/${docId}`),
+  summarizeText: (text) => client.post('/summarize/text', { text }),
 };
 
 // --- Flashcards API ---
 export const flashcardsAPI = {
-  generate: (docId) => client.post('/flashcards/generate', { document_id: docId }),
-  list: (docId) => client.get(`/flashcards/${docId}`),
-  rate: (cardId, rating) => client.put(`/flashcards/${cardId}/rate`, { rating }),
-  markMastered: (cardId) => client.put(`/flashcards/${cardId}/mastered`),
+  generate: (docId, options = {}) => client.post(`/flashcards/generate/${docId}`, options),
+  list: (docId) => client.get(docId ? `/flashcards/?doc_id=${docId}` : '/flashcards/'),
+  due: () => client.get('/flashcards/due'),
+  create: (data) => client.post('/flashcards/', data),
+  review: (cardId, correct) => client.post(`/flashcards/${cardId}/review`, { correct }),
+  delete: (cardId) => client.delete(`/flashcards/${cardId}`),
 };
 
 // --- Quiz API ---
 export const quizAPI = {
   generate: (docId, numQuestions = 5) =>
-    client.post('/quiz/generate', { document_id: docId, num_questions: numQuestions }),
-  submit: (quizId, answers) => client.post(`/quiz/${quizId}/submit`, { answers }),
-  history: () => client.get('/quiz/history'),
+    client.post(`/quiz/generate/${docId}`, { num_questions: numQuestions }),
+  submit: (quizId, answers, timeTakenSeconds = 0) =>
+    client.post('/quiz/submit', { quiz_id: quizId, answers, time_taken_seconds: timeTakenSeconds }),
+  history: (docId) => client.get(docId ? `/quiz/results?doc_id=${docId}` : '/quiz/results'),
+  getResultDetails: (resultId) => client.get(`/quiz/results/${resultId}`),
 };
 
 // --- Progress API ---
 export const progressAPI = {
-  overview: () => client.get('/progress/overview'),
-  weekly: () => client.get('/progress/weekly'),
-  scoreHistory: () => client.get('/progress/score-history'),
+  overview: () => client.get('/progress/dashboard'),
+  weekly: () => client.get('/progress/dashboard'),
+  scoreHistory: () => client.get('/progress/dashboard'),
   achievements: () => client.get('/progress/achievements'),
   recommendations: () => client.get('/progress/recommendations'),
-  sessions: () => client.get('/progress/sessions'),
-  flashcardStats: () => client.get('/progress/flashcard-stats'),
+  sessions: (page = 1, perPage = 10) => client.get(`/progress/sessions?page=${page}&per_page=${perPage}`),
+  saveSession: (data) => client.post('/progress/session', data),
+  flashcardStats: () => client.get('/progress/dashboard'),
 };
 
 export default client;

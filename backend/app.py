@@ -45,6 +45,17 @@ def create_app(config_name=None):
     # CORS setup
     CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
 
+    # Base & Health Routes
+    @app.route("/")
+    @app.route("/api")
+    @app.route("/api/")
+    def index():
+        return jsonify({
+            "success": True,
+            "message": "Smart Study Platform API is online",
+            "version": "1.0.0"
+        }), 200
+
     # Register blueprints
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(documents_bp, url_prefix="/api/documents")
