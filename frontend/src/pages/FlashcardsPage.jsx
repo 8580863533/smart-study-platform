@@ -55,7 +55,24 @@ export default function FlashcardsPage() {
       const res = await axios.get(`/api/flashcards/?doc_id=${id}`);
       if (res.data.success) {
         const items = res.data.data.items || res.data.data;
-        setCards(Array.isArray(items) ? items : []);
+        const list = Array.isArray(items) ? items : [];
+        if (list.length === 0) {
+          // Auto-generate flashcards across full PDF if none exist yet
+          const genRes = await axios.post(`/api/flashcards/generate/${id}`);
+          if (genRes.data.success) {
+            const payload = genRes.data.data;
+            const genList = Array.isArray(payload)
+              ? payload
+              : Array.isArray(payload?.flashcards)
+              ? payload.flashcards
+              : Array.isArray(payload?.items)
+              ? payload.items
+              : [];
+            setCards(genList);
+          }
+        } else {
+          setCards(list);
+        }
       }
     } catch (err) {
       console.error(err);

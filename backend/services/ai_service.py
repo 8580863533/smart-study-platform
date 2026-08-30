@@ -280,27 +280,42 @@ class AIService:
     def answer_question(self, question: str, context: str) -> Dict:
         """
         Answer *question* using *context*.
-
-        Returns::
-            {
-                "answer": str,
-                "confidence": float,   # 0.0 – 1.0
-                "source_passage": str,
-            }
+        Rank semantic chunks across ALL pages of the document to find the best relevant passage.
         """
         if not question or not context:
             return {"answer": "Insufficient context provided.", "confidence": 0.0, "source_passage": ""}
 
+        # Retrieve relevant passage from anywhere in the multi-page PDF using TF-IDF chunk ranking
+        from services.pdf_service import PdfService
+        pdf_svc = PdfService()
+        chunks = pdf_svc.split_into_chunks(context, chunk_size=350)
+        best_passage = context
+
+        if _SKLEARN_AVAILABLE and len(chunks) > 1:
+            try:
+                vec = TfidfVectorizer(stop_words="english", ngram_range=(1, 2))
+                corpus = [question] + chunks
+                matrix = vec.fit_transform(corpus)
+                sims = cosine_similarity(matrix[0], matrix[1:]).flatten()
+                top_idx = int(np.argmax(sims))
+                # Take the best matching chunk and adjacent chunk for maximum context
+                selected_chunks = [chunks[top_idx]]
+                if top_idx + 1 < len(chunks):
+                    selected_chunks.append(chunks[top_idx + 1])
+                best_passage = " ".join(selected_chunks)
+            except Exception as exc:
+                logger.warning("Multi-page chunk ranking failed: %s", exc)
+
         try:
             if self._mode == "hf_api":
-                return self._qa_hf(question, context)
+                return self._qa_hf(question, best_passage)
             elif self._mode == "local":
-                return self._qa_local(question, context)
+                return self._qa_local(question, best_passage)
             else:
-                return self._qa_lite(question, context)
+                return self._qa_lite(question, best_passage)
         except Exception as exc:
             logger.error("answer_question error (%s): %s", self._mode, exc)
-            return self._qa_lite(question, context)
+            return self._qa_lite(question, best_passage)
 
     def _qa_lite(self, question: str, context: str) -> Dict:
         """
@@ -458,23 +473,27 @@ class AIService:
         """
         from services.pdf_service import PdfService
         pdf_svc = PdfService()
-        paragraphs = pdf_svc.extract_paragraphs(text)
+        all_paragraphs = pdf_svc.extract_paragraphs(text)
         
+        # Stratified sampling across ALL pages (beginning, middle, and end of document)
+        if len(all_paragraphs) > num_cards:
+            step = len(all_paragraphs) / float(num_cards)
+            paragraphs = [all_paragraphs[int(i * step)] for i in range(num_cards)]
+        else:
+            paragraphs = all_paragraphs
+
         # Ensure we have sentences
         sentences = [s.strip() for s in sent_tokenize(text) if s.strip()]
         if not sentences:
-            # Fallback if sentence tokenizer got nothing
             sentences = [s.strip() for s in text.split('\n') if s.strip()]
         if not sentences:
             sentences = [text]
 
-        key_terms = extract_key_terms(text, top_n=30)
+        key_terms = extract_key_terms(text, top_n=40)
         cards: List[Dict] = []
 
-        # Strategy 1: paragraph-level cards
+        # Strategy 1: paragraph-level cards (sampled from all pages)
         for para in paragraphs:
-            if len(cards) >= num_cards:
-                break
             para_sents = [s.strip() for s in sent_tokenize(para) if s.strip()]
             if len(para_sents) < 2:
                 continue

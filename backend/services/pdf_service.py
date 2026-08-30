@@ -81,14 +81,27 @@ class PdfService:
         pages: List[str] = []
         try:
             doc = fitz.open(file_path)
-            for page_num in range(len(doc)):
+            total_pages = len(doc)
+            logger.info("Extracting text from PDF (%d pages): %s", total_pages, file_path)
+
+            for page_num in range(total_pages):
                 page = doc.load_page(page_num)
-                text = page.get_text("text")
+                text = page.get_text("text", sort=True)
                 
-                # If page contains little/no text layer and OCR is available, try OCR
-                if len(text.strip()) < 30 and tesseract_available:
+                # If text mode is empty or sparse, try block-level extraction
+                if len(text.strip()) < 20:
                     try:
-                        # Render page at 2x zoom for higher quality OCR
+                        blocks = page.get_text("blocks")
+                        if isinstance(blocks, list):
+                            block_texts = [b[4].strip() for b in blocks if len(b) >= 5 and isinstance(b[4], str) and b[4].strip()]
+                            if block_texts:
+                                text = "\n".join(block_texts)
+                    except Exception:
+                        pass
+
+                # If still sparse and OCR is available, run OCR
+                if len(text.strip()) < 20 and tesseract_available:
+                    try:
                         pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
                         img_data = pix.tobytes("png")
                         image = Image.open(io.BytesIO(img_data))
@@ -97,9 +110,12 @@ class PdfService:
                             text = ocr_text
                     except Exception:
                         pass
-                
+
                 if text.strip():
-                    pages.append(text)
+                    pages.append(text.strip())
+                else:
+                    logger.warning("Page %d of PDF had no extractable text.", page_num + 1)
+            
             doc.close()
         except Exception as exc:
             raise RuntimeError(f"PyMuPDF failed on '{file_path}': {exc}") from exc
