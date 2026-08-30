@@ -15,6 +15,7 @@ from routes.summarize import summarize_bp
 from routes.flashcards import flashcards_bp
 from routes.quiz import quiz_bp
 from routes.progress import progress_bp
+from routes.voicerooms import voicerooms_bp
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,6 +65,7 @@ def create_app(config_name=None):
     app.register_blueprint(flashcards_bp, url_prefix="/api/flashcards")
     app.register_blueprint(quiz_bp, url_prefix="/api/quiz")
     app.register_blueprint(progress_bp, url_prefix="/api/progress")
+    app.register_blueprint(voicerooms_bp, url_prefix="/api/voicerooms")
 
     # JWT Error handlers
     @jwt.expired_token_loader

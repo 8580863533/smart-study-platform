@@ -470,3 +470,115 @@ class ActiveQuiz(db.Model):
 
     def __repr__(self) -> str:
         return f"<ActiveQuiz {self.id} expires={self.expires_at}>"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VoiceRoom & VoiceRoomParticipant & VoiceRoomMessage
+# ══════════════════════════════════════════════════════════════════════════════
+
+class VoiceRoom(db.Model):
+    """Collaborative Voice Room (max 6 participants)."""
+
+    __tablename__ = "voice_rooms"
+
+    id = db.Column(db.String(36), primary_key=True, default=_uuid)
+    room_code = db.Column(db.String(10), unique=True, nullable=False, index=True)
+    title = db.Column(db.String(150), nullable=False)
+    host_id = db.Column(
+        db.String(36), db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    document_id = db.Column(
+        db.String(36), db.ForeignKey("documents.id", ondelete="SET NULL"), nullable=True
+    )
+    max_participants = db.Column(db.Integer, default=6, nullable=False)
+    is_active = db.Column(db.Boolean, default=True, nullable=False)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now, nullable=False)
+
+    participants = db.relationship("VoiceRoomParticipant", backref="room", cascade="all, delete-orphan")
+    messages = db.relationship("VoiceRoomMessage", backref="room", cascade="all, delete-orphan")
+
+    def to_dict(self, include_participants=True) -> dict:
+        user_host = User.query.get(self.host_id)
+        doc = Document.query.get(self.document_id) if self.document_id else None
+        active_parts = [p for p in self.participants if p.is_active]
+        return {
+            "id": self.id,
+            "room_code": self.room_code,
+            "title": self.title,
+            "host_id": self.host_id,
+            "host_name": user_host.name if user_host else "Unknown",
+            "document_id": self.document_id,
+            "document_title": doc.title if doc else None,
+            "max_participants": self.max_participants,
+            "current_participants": len(active_parts),
+            "is_active": self.is_active,
+            "created_at": self.created_at.isoformat(),
+            "participants": [p.to_dict() for p in active_parts] if include_participants else []
+        }
+
+    def __repr__(self) -> str:
+        return f"<VoiceRoom {self.room_code} title={self.title!r}>"
+
+
+class VoiceRoomParticipant(db.Model):
+    """Participant in a Voice Room."""
+
+    __tablename__ = "voice_room_participants"
+
+    id = db.Column(db.String(36), primary_key=True, default=_uuid)
+    room_id = db.Column(
+        db.String(36), db.ForeignKey("voice_rooms.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id = db.Column(
+        db.String(36), db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    peer_id = db.Column(db.String(100), nullable=True)
+    is_muted = db.Column(db.Boolean, default=False, nullable=False)
+    is_deafened = db.Column(db.Boolean, default=False, nullable=False)
+    is_active = db.Column(db.Boolean, default=True, nullable=False)
+    joined_at = db.Column(db.DateTime, default=_now, nullable=False)
+    last_seen = db.Column(db.DateTime, default=_now, nullable=False)
+
+    def to_dict(self) -> dict:
+        user = User.query.get(self.user_id)
+        return {
+            "id": self.id,
+            "room_id": self.room_id,
+            "user_id": self.user_id,
+            "user_name": user.name if user else "Student",
+            "peer_id": self.peer_id,
+            "is_muted": self.is_muted,
+            "is_deafened": self.is_deafened,
+            "is_active": self.is_active,
+            "joined_at": self.joined_at.isoformat(),
+            "last_seen": self.last_seen.isoformat()
+        }
+
+
+class VoiceRoomMessage(db.Model):
+    """Text chat message within a Voice Room."""
+
+    __tablename__ = "voice_room_messages"
+
+    id = db.Column(db.String(36), primary_key=True, default=_uuid)
+    room_id = db.Column(
+        db.String(36), db.ForeignKey("voice_rooms.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id = db.Column(
+        db.String(36), db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    content = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+
+    def to_dict(self) -> dict:
+        user = User.query.get(self.user_id)
+        return {
+            "id": self.id,
+            "room_id": self.room_id,
+            "user_id": self.user_id,
+            "user_name": user.name if user else "Student",
+            "content": self.content,
+            "created_at": self.created_at.isoformat(),
+        }
+

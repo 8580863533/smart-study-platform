@@ -5,6 +5,7 @@ import { useToast } from '../hooks/useToast';
 
 const navLinks = [
   { to: '/dashboard', label: 'Dashboard', icon: '🏠' },
+  { to: '/voicerooms', label: 'Voice Rooms', icon: '🎙️' },
   { to: '/upload', label: 'Upload', icon: '📤' },
   { to: '/qa', label: 'Q&A', icon: '💬' },
   { to: '/flashcards', label: 'Flashcards', icon: '🃏' },

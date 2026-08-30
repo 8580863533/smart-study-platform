@@ -89,6 +89,7 @@ export default function Sidebar({ collapsed = false }) {
         <div style={styles.section}>
           <div style={styles.sectionTitle}>Quick Links</div>
           {[
+            { icon: '🎙️', label: 'Voice Rooms', path: '/voicerooms' },
             { icon: '📤', label: 'Upload Document', path: '/upload' },
             { icon: '💬', label: 'Ask Questions', path: '/qa' },
             { icon: '📝', label: 'Summarize', path: '/summarize' },

@@ -1,11 +1,14 @@
 import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './context/AuthContext';
+import { VoiceRoomProvider } from './context/VoiceRoomContext';
 import Toast from './components/Toast';
+import VoiceRoomWidget from './components/VoiceRoomWidget';
 import LandingPage from './pages/LandingPage';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
 import Dashboard from './pages/Dashboard';
+import VoiceRoomsPage from './pages/VoiceRoomsPage';
 import UploadPage from './pages/UploadPage';
 import QAPage from './pages/QAPage';
 import SummarizePage from './pages/SummarizePage';
@@ -46,8 +49,9 @@ function PublicRoute({ children }) {
 
 export default function App() {
   return (
-    <>
+    <VoiceRoomProvider>
       <Toast />
+      <VoiceRoomWidget />
       <Routes>
         {/* Public */}
         <Route path="/" element={<LandingPage />} />
@@ -56,6 +60,7 @@ export default function App() {
 
         {/* Protected */}
         <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+        <Route path="/voicerooms" element={<ProtectedRoute><VoiceRoomsPage /></ProtectedRoute>} />
         <Route path="/upload" element={<ProtectedRoute><UploadPage /></ProtectedRoute>} />
         <Route path="/qa" element={<ProtectedRoute><QAPage /></ProtectedRoute>} />
         <Route path="/qa/:docId" element={<ProtectedRoute><QAPage /></ProtectedRoute>} />
@@ -71,6 +76,6 @@ export default function App() {
         {/* Fallback */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-    </>
+    </VoiceRoomProvider>
   );
 }

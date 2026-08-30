@@ -128,4 +128,18 @@ export const progressAPI = {
   flashcardStats: () => client.get('/progress/dashboard'),
 };
 
+// --- Voice Rooms API ---
+export const voiceroomsAPI = {
+  create: (title, documentId, peerId) => client.post('/voicerooms/create', { title, document_id: documentId, peer_id: peerId }),
+  join: (roomIdentifier, peerId) => client.post('/voicerooms/join', { room_code: roomIdentifier, room_id: roomIdentifier, peer_id: peerId }),
+  active: () => client.get('/voicerooms/active'),
+  getDetails: (roomId) => client.get(`/voicerooms/${roomId}`),
+  leave: (roomId) => client.post(`/voicerooms/${roomId}/leave`),
+  updateState: (roomId, state) => client.post(`/voicerooms/${roomId}/state`, state),
+  sendSignal: (roomId, targetUserId, signal) => client.post(`/voicerooms/${roomId}/signal`, { target_user_id: targetUserId, signal }),
+  getSignals: (roomId) => client.get(`/voicerooms/${roomId}/signals`),
+  sendChat: (roomId, content) => client.post(`/voicerooms/${roomId}/chat`, { content }),
+  getChat: (roomId) => client.get(`/voicerooms/${roomId}/chat`),
+};
+
 export default client;
