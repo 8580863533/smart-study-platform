@@ -1,5 +1,11 @@
 import axios from 'axios';
 
+export const API_BASE = import.meta.env.VITE_API_BASE_URL || 'https://smart-study-backend.onrender.com/api';
+
+// Set global axios defaults
+axios.defaults.baseURL = API_BASE;
+axios.defaults.timeout = 8000;
+
 // --- Global Axios Defaults and Interceptors ---
 axios.interceptors.request.use(
   (config) => {
@@ -26,9 +32,9 @@ axios.interceptors.response.use(
 
 // --- Axios Instance ---
 const client = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || 'https://smart-study-backend.onrender.com/api',
+  baseURL: API_BASE,
   headers: { 'Content-Type': 'application/json' },
-  timeout: 30000,
+  timeout: 8000,
 });
 
 // --- Request Interceptor: attach JWT ---
