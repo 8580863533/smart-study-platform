@@ -5,7 +5,8 @@ import Sidebar from '../components/Sidebar';
 import VoiceButton from '../components/VoiceButton';
 import { useStudy } from '../context/StudyContext';
 import { useToast } from '../hooks/useToast';
-import axios from 'axios';
+import { qaAPI } from '../api/client';
+import { answerQuestionFromText } from '../utils/aiEngine';
 
 export default function QAPage() {
   const { docId } = useParams();
@@ -92,12 +93,8 @@ export default function QAPage() {
     setLoading(true);
 
     try {
-      const res = await axios.post('/api/qa/ask', {
-        document_id: selectedDocId,
-        question: currentQuestion
-      });
-
-      if (res.data.success) {
+      const res = await qaAPI.ask(selectedDocId, currentQuestion);
+      if (res.data?.success && res.data?.data) {
         const { answer, confidence, source_passage, xp_earned } = res.data.data;
         setChatHistory(prev => [...prev, {
           sender: 'ai',
@@ -106,16 +103,26 @@ export default function QAPage() {
           source: source_passage,
           timestamp: new Date().toISOString()
         }]);
-        addToast(`Correctly answered! +${xp_earned} XP`, "success");
-      } else {
-        addToast(res.data.message || "Could not answer question.", "error");
+        addToast(`Answered from notes! +${xp_earned || 5} XP`, "success");
+        setLoading(false);
+        return;
       }
     } catch (err) {
-      console.error(err);
-      addToast("Failed to fetch answer from AI.", "error");
-    } finally {
-      setLoading(false);
+      console.warn("Backend QA notice, using local document AI engine:", err);
     }
+
+    // Fallback: Answer instantly using document content across all pages
+    const doc = documents.find(d => d.id === selectedDocId);
+    const fallbackAnswer = answerQuestionFromText(currentQuestion, doc?.content || "");
+    setChatHistory(prev => [...prev, {
+      sender: 'ai',
+      text: fallbackAnswer.answer,
+      confidence: fallbackAnswer.confidence,
+      source: fallbackAnswer.source_passage,
+      timestamp: new Date().toISOString()
+    }]);
+    addToast("Answered from notes content! +5 XP", "success");
+    setLoading(false);
   };
 
   const handleVoiceTranscript = (text) => {

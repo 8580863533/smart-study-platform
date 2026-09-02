@@ -4,7 +4,8 @@ import Navbar from '../components/Navbar';
 import Sidebar from '../components/Sidebar';
 import { useStudy } from '../context/StudyContext';
 import { useToast } from '../hooks/useToast';
-import axios from 'axios';
+import { quizAPI } from '../api/client';
+import { generateQuizFromText } from '../utils/aiEngine';
 
 const SECONDS_PER_QUESTION = 30;
 
@@ -73,11 +74,8 @@ export default function QuizPage() {
 
     setQuizState('loading');
     try {
-      const res = await axios.post(`/api/quiz/generate/${selectedDocId}`, {
-        num_questions: numQuestions
-      });
-
-      if (res.data.success) {
+      const res = await quizAPI.generate(selectedDocId, numQuestions);
+      if (res.data?.success && res.data?.data) {
         setQuizData(res.data.data);
         setCurrentQIndex(0);
         setUserAnswers({});
@@ -86,15 +84,23 @@ export default function QuizPage() {
         setTotalTimeTaken(0);
         setQuizState('quiz');
         setTimerActive(true);
-      } else {
-        addToast(res.data.message || "Failed to generate quiz.", "error");
-        setQuizState('setup');
+        return;
       }
     } catch (err) {
-      console.error(err);
-      addToast("Error generating quiz from AI.", "error");
-      setQuizState('setup');
+      console.warn("Backend quiz notice, using local document AI engine:", err);
     }
+
+    // Fallback: Generate quiz directly from the uploaded document text
+    const doc = documents.find(d => d.id === selectedDocId);
+    const fallbackQuiz = generateQuizFromText(doc?.content || "", numQuestions);
+    setQuizData(fallbackQuiz);
+    setCurrentQIndex(0);
+    setUserAnswers({});
+    setSelectedOption(null);
+    setTimeRemaining(SECONDS_PER_QUESTION);
+    setTotalTimeTaken(0);
+    setQuizState('quiz');
+    setTimerActive(true);
   };
 
   const handleOptionSelect = (option) => {

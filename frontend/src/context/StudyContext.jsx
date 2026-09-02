@@ -1,58 +1,66 @@
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
 import { documentsAPI } from '../api/client';
+import { getStoredDocuments, saveDocumentLocally, deleteStoredDocument } from '../utils/aiEngine';
 
 const StudyContext = createContext(null);
 
 export function StudyProvider({ children }) {
   const [activeDocument, setActiveDocument] = useState(null);
-  const [documents, setDocuments] = useState([]);
+  const [documents, setDocuments] = useState(() => getStoredDocuments());
   const [loadingDocs, setLoadingDocs] = useState(false);
+
+  // Initialize from local storage on mount
+  useEffect(() => {
+    const localDocs = getStoredDocuments();
+    setDocuments(localDocs);
+    if (localDocs.length > 0 && !activeDocument) {
+      setActiveDocument(localDocs[0]);
+    }
+  }, []);
 
   const loadDocuments = useCallback(async () => {
     setLoadingDocs(true);
+    // Read local stored documents first for zero lag
+    const localDocs = getStoredDocuments();
+    setDocuments(localDocs);
+
     try {
       const res = await documentsAPI.list();
-      const payload = res.data.data;
-      const docsList = payload?.items || (Array.isArray(payload) ? payload : []);
-      if (docsList.length > 0) {
-        setDocuments(docsList);
-      } else {
-        // Provide built-in study material so users can start immediately
-        const defaultDoc = {
-          id: 'doc-ai-intro-1',
-          title: 'Artificial Intelligence & Machine Learning Notes (Comprehensive 13-Page Guide)',
-          word_count: 1420,
-          file_type: 'pdf',
-          created_at: new Date().toISOString(),
-          content: 'Artificial Intelligence (AI) refers to the simulation of human intelligence in machines that are programmed to think like humans and mimic their actions. The term may also be applied to any machine that exhibits traits associated with a human mind such as learning and problem-solving. Machine learning (ML) is a subfield of artificial intelligence that focuses on building systems that learn from data. Deep learning is a subset of machine learning based on artificial neural networks with representation learning. Neural networks consist of layers of interconnected nodes or neurons. Supervised learning algorithms learn from labeled training data, while unsupervised learning uncovers hidden patterns in unlabeled data. Reinforcement learning trains agents through reward and penalty mechanisms. Natural Language Processing (NLP) enables computers to understand, interpret, and manipulate human language.'
-        };
-        setDocuments([defaultDoc]);
+      const payload = res.data?.data;
+      const remoteList = payload?.items || (Array.isArray(payload) ? payload : []);
+      if (remoteList.length > 0) {
+        // Merge remote and local documents
+        const mergedMap = new Map();
+        localDocs.forEach(d => mergedMap.set(d.id, d));
+        remoteList.forEach(d => mergedMap.set(d.id, d));
+        const mergedList = Array.from(mergedMap.values());
+        setDocuments(mergedList);
+        localStorage.setItem('study_documents', JSON.stringify(mergedList));
       }
     } catch (err) {
-      console.warn('Backend unavailable, using local sample document:', err);
-      const defaultDoc = {
-        id: 'doc-ai-intro-1',
-        title: 'Artificial Intelligence & Machine Learning Notes (Comprehensive 13-Page Guide)',
-        word_count: 1420,
-        file_type: 'pdf',
-        created_at: new Date().toISOString(),
-        content: 'Artificial Intelligence (AI) refers to the simulation of human intelligence in machines that are programmed to think like humans and mimic their actions. The term may also be applied to any machine that exhibits traits associated with a human mind such as learning and problem-solving. Machine learning (ML) is a subfield of artificial intelligence that focuses on building systems that learn from data. Deep learning is a subset of machine learning based on artificial neural networks with representation learning. Neural networks consist of layers of interconnected nodes or neurons. Supervised learning algorithms learn from labeled training data, while unsupervised learning uncovers hidden patterns in unlabeled data. Reinforcement learning trains agents through reward and penalty mechanisms. Natural Language Processing (NLP) enables computers to understand, interpret, and manipulate human language.'
-      };
-      setDocuments([defaultDoc]);
+      console.warn('Backend list unavailable, keeping local documents:', err);
     } finally {
       setLoadingDocs(false);
     }
   }, []);
 
+  const addDocument = useCallback((doc) => {
+    const updated = saveDocumentLocally(doc);
+    setDocuments(updated);
+    setActiveDocument(doc);
+    return updated;
+  }, []);
+
   const deleteDocument = useCallback(async (docId) => {
+    deleteStoredDocument(docId);
+    setDocuments(prev => prev.filter(d => d.id !== docId));
+    if (activeDocument?.id === docId) {
+      setActiveDocument(null);
+    }
     try {
       await documentsAPI.delete(docId);
-      setDocuments(prev => prev.filter(d => d.id !== docId));
-      if (activeDocument?.id === docId) {
-        setActiveDocument(null);
-      }
     } catch (err) {
-      console.error('Failed to delete document', err);
+      console.warn('Backend delete error:', err);
     }
   }, [activeDocument]);
 
@@ -61,6 +69,7 @@ export function StudyProvider({ children }) {
     setActiveDocument,
     documents,
     setDocuments,
+    addDocument,
     loadDocuments,
     loadingDocs,
     deleteDocument,
