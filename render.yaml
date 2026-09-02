@@ -1,35 +1,27 @@
 services:
-  # Python Flask Backend
+  # Python Flask Backend — native runtime (faster build than Docker on free tier)
   - type: web
-    name: ai-study-tutor-backend
-    env: docker
-    dockerfilePath: backend/Dockerfile
-    dockerContextDir: backend
+    name: smart-study-backend
+    env: python
+    region: oregon
     plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements-prod.txt && python -c "import nltk; nltk.download('punkt'); nltk.download('punkt_tab'); nltk.download('stopwords'); nltk.download('averaged_perceptron_tagger')"
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 2 --timeout 120 run:app
     envVars:
       - key: FLASK_ENV
         value: production
       - key: DATABASE_URL
-        value: sqlite:////data/studytutor.db # persists in sqlite volume
+        value: sqlite:////data/studytutor.db
       - key: SECRET_KEY
         generateValue: true
       - key: JWT_SECRET_KEY
         generateValue: true
       - key: USE_LOCAL_MODELS
         value: "false"
+      - key: UPLOAD_FOLDER
+        value: /data/uploads
     disk:
       name: sqlite-data
       mountPath: /data
       sizeGB: 1
-
-  # Frontend static hosting
-  - type: web
-    name: ai-study-tutor-frontend
-    env: static
-    buildCommand: cd frontend && npm install && npm run build
-    publishPath: frontend/dist
-    plan: free
-    routes:
-      - type: rewrite
-        src: /*
-        dest: /index.html

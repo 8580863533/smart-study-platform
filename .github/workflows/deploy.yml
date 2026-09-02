@@ -41,7 +41,7 @@ jobs:
           cd frontend
           npm run build
         env:
-          VITE_API_BASE_URL: https://ai-study-tutor-backend.onrender.com/api
+          VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL || 'https://smart-study-backend.onrender.com/api' }}
 
       - name: Deploy to gh-pages branch
         uses: peaceiris/actions-gh-pages@v4

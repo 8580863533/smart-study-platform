@@ -26,7 +26,7 @@ axios.interceptors.response.use(
 
 // --- Axios Instance ---
 const client = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || '/api',
+  baseURL: import.meta.env.VITE_API_BASE_URL || 'https://smart-study-backend.onrender.com/api',
   headers: { 'Content-Type': 'application/json' },
   timeout: 30000,
 });
