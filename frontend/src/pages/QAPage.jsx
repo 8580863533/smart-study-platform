@@ -92,49 +92,42 @@ export default function QAPage() {
 
     const currentQuestion = question.trim();
     setQuestion('');
-    
-    // User message
+
+    // Add user message immediately
     const userMsg = { sender: 'user', text: currentQuestion, timestamp: new Date().toISOString() };
     setChatHistory(prev => {
       const updated = [...prev, userMsg];
       localStorage.setItem(`qa_history_${selectedDocId}`, JSON.stringify(updated));
       return updated;
     });
-    setLoading(true);
 
-    try {
-      const res = await qaAPI.ask(selectedDocId, currentQuestion);
-      if (res.data?.success && res.data?.data) {
-        const { answer, confidence, source_passage, xp_earned } = res.data.data;
-        const aiMsg = {
-          sender: 'ai',
-          text: answer,
-          confidence: confidence,
-          source: source_passage,
-          timestamp: new Date().toISOString()
-        };
-        setChatHistory(prev => {
-          const updated = [...prev, aiMsg];
-          localStorage.setItem(`qa_history_${selectedDocId}`, JSON.stringify(updated));
-          return updated;
-        });
-        addToast(`Answered from notes! +${xp_earned || 5} XP`, "success");
-        setLoading(false);
-        return;
-      }
-    } catch (err) {
-      console.warn("Backend QA notice, using local document AI engine:", err);
+    // ── Answer INSTANTLY from local document content ──────────────────
+    // No loading spinner — answer in milliseconds from the uploaded PDF text
+    const doc = documents.find(d => d.id === selectedDocId) || activeDocument;
+    const docContent = doc?.content || '';
+
+    if (!docContent || docContent.trim().length < 10) {
+      const noDocMsg = {
+        sender: 'ai',
+        text: 'No document content found. Please upload a PDF or text file first, then ask your question.',
+        confidence: 1.0,
+        source: '',
+        timestamp: new Date().toISOString()
+      };
+      setChatHistory(prev => {
+        const updated = [...prev, noDocMsg];
+        localStorage.setItem(`qa_history_${selectedDocId}`, JSON.stringify(updated));
+        return updated;
+      });
+      return;
     }
 
-    // Fallback: Answer instantly using document content across all pages
-    const doc = documents.find(d => d.id === selectedDocId) || activeDocument;
-    const docContent = doc?.content || "";
-    const fallbackAnswer = answerQuestionFromText(currentQuestion, docContent);
+    const result = answerQuestionFromText(currentQuestion, docContent);
     const aiMsg = {
       sender: 'ai',
-      text: fallbackAnswer.answer,
-      confidence: fallbackAnswer.confidence,
-      source: fallbackAnswer.source_passage,
+      text: result.answer,
+      confidence: result.confidence,
+      source: result.source_passage,
       timestamp: new Date().toISOString()
     };
     setChatHistory(prev => {
@@ -142,9 +135,12 @@ export default function QAPage() {
       localStorage.setItem(`qa_history_${selectedDocId}`, JSON.stringify(updated));
       return updated;
     });
-    addToast("Answered from notes content! +5 XP", "success");
-    setLoading(false);
+    addToast('Answered from your notes! +5 XP', 'success');
+
+    // Sync to backend in background (non-blocking, won't affect UI)
+    qaAPI.ask(selectedDocId, currentQuestion).catch(() => {});
   };
+
 
   const handleVoiceTranscript = (text) => {
     setQuestion(text);
@@ -311,24 +307,6 @@ export default function QAPage() {
                   </div>
                 ))}
 
-                {loading && (
-                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', width: '100%' }}>
-                    <div className="glass-card" style={{
-                      padding: '16px 24px',
-                      borderRadius: '16px',
-                      color: 'rgba(240,240,255,0.6)'
-                    }}>
-                      <div style={{ display: 'flex', gap: '6px' }}>
-                        <span className="dot" style={{ animation: 'bounce 1s infinite', animationDelay: '0s' }}>•</span>
-                        <span className="dot" style={{ animation: 'bounce 1s infinite', animationDelay: '0.2s' }}>•</span>
-                        <span className="dot" style={{ animation: 'bounce 1s infinite', animationDelay: '0.4s' }}>•</span>
-                      </div>
-                      <span style={{ fontSize: '0.8rem', color: 'rgba(240,240,255,0.4)', marginTop: '8px', display: 'inline-block' }}>
-                        AI is reading "{selectedDoc?.title}"...
-                      </span>
-                    </div>
-                  </div>
-                )}
                 <div ref={chatEndRef} />
               </>
             )}
@@ -366,7 +344,7 @@ export default function QAPage() {
 
                 <button
                   type="submit"
-                  disabled={loading || !question.trim()}
+                  disabled={!question.trim()}
                   className="btn btn-primary"
                   style={{
                     padding: '14px 24px',

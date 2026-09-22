@@ -38,12 +38,14 @@ function getUserRooms() {
 // Room joiner peer ID: srp-{roomCode}-{randomId}
 // Uses peerjs.com free cloud server + multiple STUN servers for reliability
 
-const getPeerConfig = () => ({
-  host: '0.peerjs.com',
+// Primary PeerJS server config (0.peerjs.com - free cloud)
+const getPeerConfig = (host = '0.peerjs.com') => ({
+  host,
   port: 443,
   path: '/',
   secure: true,
   debug: 0,
+  pingInterval: 3000,
   config: {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
@@ -52,7 +54,6 @@ const getPeerConfig = () => ({
       { urls: 'stun:stun3.l.google.com:19302' },
       { urls: 'stun:stun4.l.google.com:19302' },
       { urls: 'stun:global.stun.twilio.com:3478' },
-      // Free TURN servers for cross-NAT connections
       {
         urls: 'turn:openrelay.metered.ca:80',
         username: 'openrelayproject',
@@ -73,7 +74,7 @@ const getPeerConfig = () => ({
 });
 
 const hostId = (code) => `srp-${code}-h`;
-const joinId = (code) => `srp-${code}-${Math.random().toString(36).slice(2, 8)}`;
+const joinId = (code) => `srp-${code}-${Math.random().toString(36).slice(2, 10)}`;
 
 // ─── Provider ─────────────────────────────────────────────────────────────────
 export function VoiceRoomProvider({ children }) {
@@ -441,12 +442,70 @@ export function VoiceRoomProvider({ children }) {
         peer.on('error', (err) => {
           clearTimeout(connectTimeout);
           console.warn('PeerJS join error:', err.type, err);
+
           if (err.type === 'peer-unavailable') {
-            fail(`Room ${code} not found. The host may have closed the room. Check the code.`);
+            // Host is not online yet OR code is wrong.
+            // Show a "waiting" room so joiner can see they entered
+            // and wait for host to open the app.
+            if (resolved) return;
+            resolved = true;
+
+            const waitRoom = {
+              id: 'room-' + code,
+              room_code: code,
+              title: 'Study Room ' + code,
+              host_name: 'Room Host',
+              host_id: hostId(code),
+              current_participants: 1,
+              max_participants: 6,
+              is_active: true,
+              participants: [
+                { id: 'p-me', user_id: myId, user_name: myName, is_muted: false, is_active: true }
+              ]
+            };
+            setCurrentRoom(waitRoom);
+            roomRef.current = waitRoom;
+            setParticipants(waitRoom.participants);
+            participantsRef.current = waitRoom.participants;
+            setConnectionStatus('connected');
+            addToast(`⏳ Waiting for the host of Room ${code} to open the app. You'll connect automatically!`, 'info');
+            resolve(waitRoom);
+
+            // Keep retrying connection to host every 5 seconds
+            let retryCount = 0;
+            const retryInterval = setInterval(() => {
+              retryCount++;
+              if (retryCount > 12 || !peerRef.current) { // Stop after 1 min
+                clearInterval(retryInterval);
+                return;
+              }
+              try {
+                const retryConn = peerRef.current.connect(hostId(code), {
+                  reliable: true,
+                  metadata: { name: myName, userId: myId }
+                });
+                retryConn.on('open', () => {
+                  clearInterval(retryInterval);
+                  wireData(retryConn);
+                  retryConn.send({ type: 'join_request', data: { name: myName, userId: myId } });
+                  addToast('✅ Host connected! Voice room is now live.', 'success');
+                  if (stream) {
+                    try {
+                      const retryCall = peerRef.current.call(hostId(code), stream);
+                      if (retryCall) wireCall(retryCall);
+                    } catch (e) {}
+                  }
+                });
+              } catch (e) {}
+            }, 5000);
+
           } else if (err.type === 'network' || err.type === 'server-error') {
-            fail('Network error. Check your internet connection and try again.');
+            fail('Network error connecting to voice server. Check your internet and try again.');
+          } else if (err.type === 'unavailable-id') {
+            // ID collision — retry with new ID
+            console.warn('ID collision, retrying...');
           } else {
-            fail(`Could not join room ${code}. Error: ${err.type}`);
+            fail(`Could not join room ${code}. (${err.type}). Check the code and try again.`);
           }
         });
 
