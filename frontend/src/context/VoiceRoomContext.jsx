@@ -4,11 +4,11 @@ import { useToast } from '../hooks/useToast';
 
 const VoiceRoomContext = createContext(null);
 
-const GLOBAL_ROOMS_TOPIC = 'study_global_voice_rooms_v1';
-const SIGNAL_TOPIC_PREFIX = 'study_vroom_sig_';
+const GLOBAL_ROOMS_TOPIC = 'study_global_voice_rooms_v2';
+const SIGNAL_TOPIC_PREFIX = 'study_vroom_sig_v2_';
 
-// Free Google STUN + OpenRelay TURN servers for NAT traversal across any network
-const ICE_CONFIG = {
+// ── Step 2: STUN / TURN Server Configuration ──────────────────────────────────
+const RTC_CONFIG = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
@@ -29,7 +29,20 @@ const ICE_CONFIG = {
       username: 'openrelayproject',
       credential: 'openrelayproject'
     }
-  ]
+  ],
+  iceCandidatePoolSize: 10,
+};
+
+// ── Step 5: Audio Constraints (Opus Codec + Noise Suppression) ─────────────────
+const AUDIO_CONSTRAINTS = {
+  audio: {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+    sampleRate: 48000,
+    channelCount: 1, // Mono Opus optimal for voice chat
+  },
+  video: false
 };
 
 const PRESET_ROOMS = [
@@ -40,7 +53,7 @@ const PRESET_ROOMS = [
 
 export function getStoredRooms() {
   try {
-    const raw = localStorage.getItem('study_rooms_cache');
+    const raw = localStorage.getItem('study_rooms_cache_v2');
     const cached = raw ? JSON.parse(raw) : [];
     if (Array.isArray(cached) && cached.length > 0) {
       return [...cached, ...PRESET_ROOMS];
@@ -49,17 +62,56 @@ export function getStoredRooms() {
   return PRESET_ROOMS;
 }
 
-// ── Publish message via free cloud signaling ──────────────────────────────────
-async function publishMsg(topic, data) {
+// ── Web Audio Chimes (Discord-Style Sound Effects) ─────────────────────────────
+function playChime(type) {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    const ctx = new AC();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    const now = ctx.currentTime;
+    if (type === 'join') {
+      // Discord-style rising chime
+      osc.frequency.setValueAtTime(440, now);
+      osc.frequency.exponentialRampToValueAtTime(880, now + 0.15);
+      gain.gain.setValueAtTime(0.15, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
+      osc.start(now);
+      osc.stop(now + 0.25);
+    } else if (type === 'leave') {
+      // Discord-style falling chime
+      osc.frequency.setValueAtTime(660, now);
+      osc.frequency.exponentialRampToValueAtTime(330, now + 0.15);
+      gain.gain.setValueAtTime(0.15, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
+      osc.start(now);
+      osc.stop(now + 0.25);
+    } else if (type === 'knock') {
+      // Knock / join request chime
+      osc.frequency.setValueAtTime(587.33, now);
+      gain.gain.setValueAtTime(0.18, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.18);
+      osc.start(now);
+      osc.stop(now + 0.18);
+    }
+  } catch (e) {}
+}
+
+// ── Step 1: Signaling Protocol (WSS + HTTP Publish) ───────────────────────────
+async function publishSignal(topic, eventData) {
   try {
     await fetch(`https://ntfy.sh/${topic}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
+      body: JSON.stringify(eventData),
       mode: 'cors'
     });
   } catch (err) {
-    console.warn('Signaling publish notice:', err);
+    console.warn('Signaling publish error:', err);
   }
 }
 
@@ -73,43 +125,47 @@ export function VoiceRoomProvider({ children }) {
   const [isDeafened, setIsDeafened] = useState(false);
   const [activeSpeakers, setActiveSpeakers] = useState({});
   const [chatMessages, setChatMessages] = useState([]);
-  const [connectionStatus, setConnectionStatus] = useState('disconnected');
+  const [connectionStatus, setConnectionStatus] = useState('disconnected'); // 'disconnected' | 'waiting_approval' | 'connected'
+  const [joinRequests, setJoinRequests] = useState([]); // List of users requesting to join: [{ peerId, userName, timestamp }]
+  const [autoAdmit, setAutoAdmit] = useState(false);
 
   const localStreamRef = useRef(null);
-  const peerConnectionsRef = useRef({}); // map: peerUserId -> RTCPeerConnection
-  const remoteAudiosRef = useRef({});    // map: peerUserId -> HTMLAudioElement
+  const peerConnectionsRef = useRef({}); // map: peerId -> RTCPeerConnection
+  const remoteAudiosRef = useRef({});    // map: peerId -> HTMLAudioElement
   const audioCtxRef = useRef(null);
   const currentRoomRef = useRef(null);
   const isMutedRef = useRef(false);
   const isDeafenedRef = useRef(false);
-  const sseRef = useRef(null);
-  const myIdRef = useRef(null);
+  const autoAdmitRef = useRef(false);
+  const wsRef = useRef(null);
+  const myPeerIdRef = useRef(null);
 
   useEffect(() => { currentRoomRef.current = currentRoom; }, [currentRoom]);
   useEffect(() => { isMutedRef.current = isMuted; }, [isMuted]);
   useEffect(() => { isDeafenedRef.current = isDeafened; }, [isDeafened]);
+  useEffect(() => { autoAdmitRef.current = autoAdmit; }, [autoAdmit]);
 
   useEffect(() => {
-    myIdRef.current = user?.id || 'usr-' + Math.random().toString(36).slice(2, 9);
+    myPeerIdRef.current = user?.id || 'u_' + Math.random().toString(36).slice(2, 9);
     return () => { cleanup(); };
   }, [user]);
 
-  // ── Microphone Audio ────────────────────────────────────────────────────────
+  // ── Step 5: Microphone & Voice Activity Detection (VAD) ─────────────────────
   const startLocalAudio = async () => {
     if (localStreamRef.current) return localStreamRef.current;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      const stream = await navigator.mediaDevices.getUserMedia(AUDIO_CONSTRAINTS);
       localStreamRef.current = stream;
-      startSpeakerDetection(stream);
+      startVAD(stream);
       return stream;
     } catch (err) {
       console.warn('Microphone permission notice:', err);
-      addToast('Microphone access needed to speak. You can still listen and chat.', 'info');
+      addToast('Microphone muted / blocked. You can still listen and chat in the room.', 'info');
       return null;
     }
   };
 
-  const startSpeakerDetection = (stream) => {
+  const startVAD = (stream) => {
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return;
@@ -124,9 +180,13 @@ export function VoiceRoomProvider({ children }) {
         if (!localStreamRef.current) return;
         analyser.getByteFrequencyData(buf);
         const avg = buf.reduce((s, v) => s + v, 0) / buf.length;
-        const myId = myIdRef.current;
+        const myId = myPeerIdRef.current;
         if (myId) {
-          setActiveSpeakers(prev => ({ ...prev, [myId]: avg > 15 && !isMutedRef.current }));
+          const isSpeaking = avg > 14 && !isMutedRef.current;
+          setActiveSpeakers(prev => {
+            if (prev[myId] === isSpeaking) return prev;
+            return { ...prev, [myId]: isSpeaking };
+          });
         }
         requestAnimationFrame(tick);
       };
@@ -134,15 +194,15 @@ export function VoiceRoomProvider({ children }) {
     } catch (e) {}
   };
 
-  const playRemoteAudio = (peerUserId, stream) => {
+  const playRemoteAudio = (peerId, stream) => {
     try {
-      let el = remoteAudiosRef.current[peerUserId];
+      let el = remoteAudiosRef.current[peerId];
       if (!el) {
         el = document.createElement('audio');
         el.autoplay = true;
         el.style.display = 'none';
         document.body.appendChild(el);
-        remoteAudiosRef.current[peerUserId] = el;
+        remoteAudiosRef.current[peerId] = el;
       }
       el.srcObject = stream;
       el.muted = isDeafenedRef.current;
@@ -165,16 +225,16 @@ export function VoiceRoomProvider({ children }) {
     remoteAudiosRef.current = {};
   };
 
-  // ── WebRTC Peer Connection Helper ──────────────────────────────────────────
-  const getOrCreatePeerConnection = (targetUserId, isInitiator = false) => {
-    if (peerConnectionsRef.current[targetUserId]) {
-      return peerConnectionsRef.current[targetUserId];
+  // ── Step 6: RTCPeerConnection Mesh Management ──────────────────────────────
+  const createPeerConnection = (targetPeerId, isInitiator = false) => {
+    if (peerConnectionsRef.current[targetPeerId]) {
+      return peerConnectionsRef.current[targetPeerId];
     }
 
-    const pc = new RTCPeerConnection(ICE_CONFIG);
-    peerConnectionsRef.current[targetUserId] = pc;
+    const pc = new RTCPeerConnection(RTC_CONFIG);
+    peerConnectionsRef.current[targetPeerId] = pc;
 
-    // Add local audio tracks if microphone is active
+    // Add local microphone audio track
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => {
         pc.addTrack(track, localStreamRef.current);
@@ -183,72 +243,126 @@ export function VoiceRoomProvider({ children }) {
 
     pc.onicecandidate = (event) => {
       if (event.candidate && currentRoomRef.current) {
-        publishMsg(SIGNAL_TOPIC_PREFIX + currentRoomRef.current.room_code, {
-          type: 'candidate',
+        sendSignal({
+          event: 'ice-candidate',
           candidate: event.candidate,
-          from: myIdRef.current,
-          to: targetUserId
+          from_peer_id: myPeerIdRef.current,
+          to_peer_id: targetPeerId,
+          room_code: currentRoomRef.current.room_code,
         });
       }
     };
 
     pc.ontrack = (event) => {
-      const remoteStream = event.streams[0];
-      if (remoteStream) {
-        playRemoteAudio(targetUserId, remoteStream);
+      const stream = event.streams[0];
+      if (stream) {
+        playRemoteAudio(targetPeerId, stream);
       }
     };
 
     pc.oniceconnectionstatechange = () => {
       if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
         setConnectionStatus('connected');
-      } else if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
-        // Retry connection with ICE restart if needed
+      } else if (pc.iceConnectionState === 'failed') {
         try { pc.restartIce(); } catch (e) {}
       }
     };
 
     if (isInitiator) {
-      pc.createOffer().then(offer => {
+      pc.createOffer({ offerToReceiveAudio: true }).then(offer => {
         return pc.setLocalDescription(offer).then(() => {
           if (currentRoomRef.current) {
-            publishMsg(SIGNAL_TOPIC_PREFIX + currentRoomRef.current.room_code, {
-              type: 'offer',
+            sendSignal({
+              event: 'sdp-offer',
               sdp: offer,
-              from: myIdRef.current,
-              to: targetUserId
+              from_peer_id: myPeerIdRef.current,
+              to_peer_id: targetPeerId,
+              room_code: currentRoomRef.current.room_code,
             });
           }
         });
-      }).catch(err => console.warn('Offer creation notice:', err));
+      }).catch(err => console.warn('Offer creation failed:', err));
     }
 
     return pc;
   };
 
-  // ── Incoming Signals Handler ───────────────────────────────────────────────
-  const handleIncomingSignal = async (data) => {
-    if (!data) return;
-    const myId = myIdRef.current;
-    const { type, from, to, sdp, candidate, user: joinUser, room: incomingRoom, message } = data;
+  // ── Signaling Transport Helper ──────────────────────────────────────────────
+  const sendSignal = (eventData) => {
+    if (!currentRoomRef.current) return;
+    const topic = SIGNAL_TOPIC_PREFIX + currentRoomRef.current.room_code;
+    publishSignal(topic, eventData);
+  };
 
-    // Ignore signals sent by self
-    if (from === myId) return;
+  // ── Step 1 & 4: Signaling Message Handler ──────────────────────────────────
+  const handleSignalMessage = async (msg) => {
+    if (!msg || !msg.event) return;
+    const myId = myPeerIdRef.current;
+    const { event, from_peer_id, to_peer_id, sdp, candidate, user_name, room_info, message } = msg;
 
-    // Chat message received
-    if (type === 'chat' && message) {
-      setChatMessages(prev => prev.some(m => m.id === message.id) ? prev : [...prev, message]);
+    // Ignore messages originated by self
+    if (from_peer_id === myId) return;
+
+    // ── 1. Host receives Join Request ─────────────────────────────────────────
+    if (event === 'request-join') {
+      const isHost = currentRoomRef.current?.host_id === myId;
+      if (!isHost) return;
+
+      playChime('knock');
+
+      if (autoAdmitRef.current) {
+        // Auto-admit is ON: immediately approve
+        approveJoinRequest(from_peer_id, user_name);
+      } else {
+        // Add to pending requests for host approval
+        setJoinRequests(prev => {
+          if (prev.some(r => r.peerId === from_peer_id)) return prev;
+          return [...prev, { peerId: from_peer_id, userName: user_name || 'Study Partner', timestamp: Date.now() }];
+        });
+        addToast(`🔔 Join Request: ${user_name || 'A classmate'} wants to join your voice room!`, 'info');
+      }
       return;
     }
 
-    // New participant joined the room
-    if (type === 'user_joined' && joinUser) {
+    // ── 2. Joiner receives Host Approval ──────────────────────────────────────
+    if (event === 'approve-join' && to_peer_id === myId) {
+      playChime('join');
+      setConnectionStatus('connected');
+      addToast('🎉 Request approved! Connected to the voice room.', 'success');
+
+      if (room_info) {
+        setCurrentRoom(room_info);
+        setParticipants(room_info.participants || []);
+      }
+
+      // Start local audio & announce join to all peers
+      await startLocalAudio();
+      sendSignal({
+        event: 'new-peer',
+        from_peer_id: myId,
+        user_name: user?.name || 'Study Partner',
+        room_code: currentRoomRef.current?.room_code,
+      });
+      return;
+    }
+
+    // ── 3. Joiner receives Host Denial ────────────────────────────────────────
+    if (event === 'deny-join' && to_peer_id === myId) {
+      setConnectionStatus('disconnected');
+      cleanup();
+      addToast('Your request to join the room was declined by the host.', 'warning');
+      return;
+    }
+
+    // ── 4. New Peer announced in Room ─────────────────────────────────────────
+    if (event === 'new-peer') {
+      playChime('join');
       setParticipants(prev => {
-        if (prev.some(p => p.user_id === joinUser.id)) return prev;
+        if (prev.some(p => p.user_id === from_peer_id)) return prev;
         const updated = [...prev, {
           id: 'p-' + Date.now(),
-          user_id: joinUser.id,
-          user_name: joinUser.name,
+          user_id: from_peer_id,
+          user_name: user_name || 'Study Partner',
           is_muted: false,
           is_active: true
         }];
@@ -256,63 +370,47 @@ export function VoiceRoomProvider({ children }) {
         return updated;
       });
 
-      // If we are the host (or existing member), reply with current room state and initiate WebRTC offer
-      if (currentRoomRef.current?.host_id === myId) {
-        publishMsg(SIGNAL_TOPIC_PREFIX + currentRoomRef.current.room_code, {
-          type: 'room_state',
-          room: currentRoomRef.current,
-          to: joinUser.id,
-          from: myId
-        });
-        // Create WebRTC offer to the joiner
-        getOrCreatePeerConnection(joinUser.id, true);
-      }
+      // Existing peers initiate WebRTC offer to the new peer
+      createPeerConnection(from_peer_id, true);
       return;
     }
 
-    // Joiner received room_state from host
-    if (type === 'room_state' && incomingRoom && to === myId) {
-      setCurrentRoom(incomingRoom);
-      setParticipants(incomingRoom.participants || []);
-      setConnectionStatus('connected');
-      return;
-    }
-
-    // WebRTC Offer received
-    if (type === 'offer' && sdp && to === myId) {
-      const pc = getOrCreatePeerConnection(from, false);
+    // ── 5. WebRTC SDP Offer ───────────────────────────────────────────────────
+    if (event === 'sdp-offer' && to_peer_id === myId && sdp) {
+      const pc = createPeerConnection(from_peer_id, false);
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(sdp));
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        publishMsg(SIGNAL_TOPIC_PREFIX + currentRoomRef.current?.room_code, {
-          type: 'answer',
+        sendSignal({
+          event: 'sdp-answer',
           sdp: answer,
-          from: myId,
-          to: from
+          from_peer_id: myId,
+          to_peer_id: from_peer_id,
+          room_code: currentRoomRef.current?.room_code,
         });
       } catch (err) {
-        console.warn('Error handling WebRTC offer:', err);
+        console.warn('Error handling SDP offer:', err);
       }
       return;
     }
 
-    // WebRTC Answer received
-    if (type === 'answer' && sdp && to === myId) {
-      const pc = peerConnectionsRef.current[from];
+    // ── 6. WebRTC SDP Answer ──────────────────────────────────────────────────
+    if (event === 'sdp-answer' && to_peer_id === myId && sdp) {
+      const pc = peerConnectionsRef.current[from_peer_id];
       if (pc) {
         try {
           await pc.setRemoteDescription(new RTCSessionDescription(sdp));
         } catch (err) {
-          console.warn('Error setting remote description from answer:', err);
+          console.warn('Error setting SDP answer:', err);
         }
       }
       return;
     }
 
-    // ICE Candidate received
-    if (type === 'candidate' && candidate && to === myId) {
-      const pc = peerConnectionsRef.current[from];
+    // ── 7. ICE Candidate ──────────────────────────────────────────────────────
+    if (event === 'ice-candidate' && to_peer_id === myId && candidate) {
+      const pc = peerConnectionsRef.current[from_peer_id];
       if (pc) {
         try {
           await pc.addIceCandidate(new RTCIceCandidate(candidate));
@@ -321,51 +419,79 @@ export function VoiceRoomProvider({ children }) {
       return;
     }
 
-    // User left room
-    if (type === 'user_left' && from) {
-      setParticipants(prev => prev.filter(p => p.user_id !== from));
-      if (peerConnectionsRef.current[from]) {
-        try { peerConnectionsRef.current[from].close(); } catch (e) {}
-        delete peerConnectionsRef.current[from];
+    // ── 8. Peer Left Room ─────────────────────────────────────────────────────
+    if (event === 'leave-room') {
+      playChime('leave');
+      setParticipants(prev => prev.filter(p => p.user_id !== from_peer_id));
+      if (peerConnectionsRef.current[from_peer_id]) {
+        try { peerConnectionsRef.current[from_peer_id].close(); } catch (e) {}
+        delete peerConnectionsRef.current[from_peer_id];
       }
-      if (remoteAudiosRef.current[from]) {
-        try { remoteAudiosRef.current[from].remove(); } catch (e) {}
-        delete remoteAudiosRef.current[from];
+      if (remoteAudiosRef.current[from_peer_id]) {
+        try { remoteAudiosRef.current[from_peer_id].remove(); } catch (e) {}
+        delete remoteAudiosRef.current[from_peer_id];
       }
+      return;
+    }
+
+    // ── 9. Chat Message ───────────────────────────────────────────────────────
+    if (event === 'chat' && message) {
+      setChatMessages(prev => prev.some(m => m.id === message.id) ? prev : [...prev, message]);
     }
   };
 
-  // ── Subscribe to Room Signaling Channel (SSE) ──────────────────────────────
-  const subscribeToRoom = (roomCode) => {
-    if (sseRef.current) {
-      sseRef.current.close();
-      sseRef.current = null;
+  // ── Subscribe to Room via WebSocket (with Auto-Reconnect) ──────────────────
+  const connectSignalingWebSocket = (roomCode) => {
+    if (wsRef.current) {
+      try { wsRef.current.close(); } catch (e) {}
+      wsRef.current = null;
     }
 
     const topic = SIGNAL_TOPIC_PREFIX + roomCode;
-    const es = new EventSource(`https://ntfy.sh/${topic}/sse`);
-    sseRef.current = es;
+    const ws = new WebSocket(`wss://ntfy.sh/${topic}/ws`);
+    wsRef.current = ws;
 
-    es.onmessage = (event) => {
+    ws.onmessage = (e) => {
       try {
-        const payload = JSON.parse(event.data);
+        const payload = JSON.parse(e.data);
         if (payload && payload.message) {
           const inner = JSON.parse(payload.message);
-          handleIncomingSignal(inner);
+          handleSignalMessage(inner);
         }
-      } catch (e) {}
+      } catch (err) {}
     };
 
-    es.onerror = () => {
-      console.warn('SSE signaling reconnection in progress...');
+    ws.onerror = () => {
+      // Fallback: SSE connection if WebSocket fails
+      fallbackToSSE(roomCode);
+    };
+
+    ws.onclose = () => {
+      // Reconnect if room is still active
+      if (currentRoomRef.current?.room_code === roomCode) {
+        setTimeout(() => connectSignalingWebSocket(roomCode), 2000);
+      }
+    };
+  };
+
+  const fallbackToSSE = (roomCode) => {
+    const topic = SIGNAL_TOPIC_PREFIX + roomCode;
+    const es = new EventSource(`https://ntfy.sh/${topic}/sse`);
+    es.onmessage = (e) => {
+      try {
+        const payload = JSON.parse(e.data);
+        if (payload && payload.message) {
+          handleSignalMessage(JSON.parse(payload.message));
+        }
+      } catch (err) {}
     };
   };
 
   const cleanup = () => {
     stopAudio();
-    if (sseRef.current) {
-      sseRef.current.close();
-      sseRef.current = null;
+    if (wsRef.current) {
+      try { wsRef.current.close(); } catch (e) {}
+      wsRef.current = null;
     }
     Object.values(peerConnectionsRef.current).forEach(pc => {
       try { pc.close(); } catch (e) {}
@@ -375,20 +501,68 @@ export function VoiceRoomProvider({ children }) {
     setCurrentRoom(null);
     setParticipants([]);
     setChatMessages([]);
+    setJoinRequests([]);
     setActiveSpeakers({});
   };
 
-  // ── Create Room (Host) ─────────────────────────────────────────────────────
-  const createRoom = async (title, documentId) => {
+  // ── Host: Approve Join Request ─────────────────────────────────────────────
+  const approveJoinRequest = (peerId, name) => {
+    const req = joinRequests.find(r => r.peerId === peerId);
+    const applicantName = name || req?.userName || 'Study Partner';
+
+    // Remove from pending requests
+    setJoinRequests(prev => prev.filter(r => r.peerId !== peerId));
+
+    // Add to participants list
+    const updatedParticipants = [
+      ...participants,
+      { id: 'p-' + Date.now(), user_id: peerId, user_name: applicantName, is_muted: false, is_active: true }
+    ];
+    setParticipants(updatedParticipants);
+
+    const updatedRoom = {
+      ...currentRoomRef.current,
+      participants: updatedParticipants,
+      current_participants: updatedParticipants.length,
+    };
+    setCurrentRoom(updatedRoom);
+    currentRoomRef.current = updatedRoom;
+
+    // Broadcast approval to the joiner
+    sendSignal({
+      event: 'approve-join',
+      to_peer_id: peerId,
+      room_info: updatedRoom,
+      from_peer_id: myPeerIdRef.current,
+    });
+
+    addToast(`✅ Admitted ${applicantName} into the voice room!`, 'success');
+  };
+
+  // ── Host: Deny Join Request ────────────────────────────────────────────────
+  const denyJoinRequest = (peerId) => {
+    setJoinRequests(prev => prev.filter(r => r.peerId !== peerId));
+    sendSignal({
+      event: 'deny-join',
+      to_peer_id: peerId,
+      from_peer_id: myPeerIdRef.current,
+    });
+    addToast('Declined join request.', 'info');
+  };
+
+  // ── Step 4: Create Voice Room (Host) ───────────────────────────────────────
+  const createRoom = async (title, documentId, autoAccept = false) => {
     await startLocalAudio();
     const code = String(Math.floor(100000 + Math.random() * 900000));
-    const myId = myIdRef.current;
+    const myId = myPeerIdRef.current;
     const myName = user?.name || 'Host';
+
+    setAutoAdmit(autoAccept);
 
     const newRoom = {
       id: 'room-' + code,
       room_code: code,
-      title: title || 'Study Voice Room',
+      title: title || 'Discord-Style Voice Room',
       document_id: documentId,
       host_name: myName,
       host_id: myId,
@@ -407,33 +581,34 @@ export function VoiceRoomProvider({ children }) {
 
     cleanup();
 
-    // 1. Publish room creation to global shared discovery so all laptops see it immediately
-    publishMsg(GLOBAL_ROOMS_TOPIC, {
+    // Publish to global discovery so all devices see the room
+    publishSignal(GLOBAL_ROOMS_TOPIC, {
       action: 'create',
       room: newRoom
     });
 
-    // 2. Cache in localStorage
+    // Cache locally
     try {
-      const raw = localStorage.getItem('study_rooms_cache');
+      const raw = localStorage.getItem('study_rooms_cache_v2');
       const cached = raw ? JSON.parse(raw) : [];
       const updated = [newRoom, ...cached.filter(r => r.room_code !== code)].slice(0, 10);
-      localStorage.setItem('study_rooms_cache', JSON.stringify(updated));
+      localStorage.setItem('study_rooms_cache_v2', JSON.stringify(updated));
     } catch (e) {}
 
-    // 3. Connect to room's signaling channel
-    subscribeToRoom(code);
+    // Connect to room's WebSocket channel
+    connectSignalingWebSocket(code);
 
     setCurrentRoom(newRoom);
     currentRoomRef.current = newRoom;
     setParticipants(newRoom.participants);
     setConnectionStatus('connected');
+    playChime('join');
     addToast(`🎙️ Voice room created! Share 6-digit code: ${code}`, 'success');
 
     return newRoom;
   };
 
-  // ── Join Room (Joiner from any laptop) ─────────────────────────────────────
+  // ── Step 4: Join Voice Room (Sends Join Request to Host) ───────────────────
   const joinRoom = async (codeOrId) => {
     const raw = String(codeOrId || '').trim();
     if (!raw) {
@@ -449,76 +624,72 @@ export function VoiceRoomProvider({ children }) {
       return null;
     }
 
-    // Check if it's a demo room
+    // Check demo rooms
     const preset = PRESET_ROOMS.find(r => r.room_code === code);
     if (preset) {
-      addToast(`"${preset.title}" is a demo preview room. Click "Create Voice Room" to start your own real room!`, 'info');
+      addToast(`"${preset.title}" is a demo preview room. Click "Create Voice Room" to start your own real voice room!`, 'info');
       return null;
     }
 
-    setConnectionStatus('connecting');
-    addToast(`🔗 Connecting to room ${code}...`, 'info');
-
-    await startLocalAudio();
-    const myId = myIdRef.current;
-    const myName = user?.name || 'Study Partner';
-
     cleanup();
 
-    // 1. Subscribe to the room's signaling topic
-    subscribeToRoom(code);
+    const myId = myPeerIdRef.current;
+    const myName = user?.name || 'Study Partner';
 
-    // 2. Initial state while connecting to host
-    const placeholder = {
+    // 1. Connect to signaling WebSocket for this room
+    connectSignalingWebSocket(code);
+
+    // 2. Set UI status to waiting approval
+    setConnectionStatus('waiting_approval');
+    const waitRoom = {
       id: 'room-' + code,
       room_code: code,
       title: 'Study Room ' + code,
       host_name: 'Room Host',
       host_id: 'host',
-      current_participants: 2,
+      current_participants: 1,
       max_participants: 6,
       is_active: true,
-      participants: [
-        { id: 'p-me', user_id: myId, user_name: myName, is_muted: false, is_active: true }
-      ]
+      participants: [{ id: 'p-me', user_id: myId, user_name: myName, is_muted: false, is_active: true }]
     };
-    setCurrentRoom(placeholder);
-    currentRoomRef.current = placeholder;
-    setParticipants(placeholder.participants);
-    setConnectionStatus('connected');
+    setCurrentRoom(waitRoom);
+    currentRoomRef.current = waitRoom;
+    setParticipants(waitRoom.participants);
 
-    // 3. Announce our presence to the host and all peers in the room
+    // 3. Send join request to the host
     setTimeout(() => {
-      publishMsg(SIGNAL_TOPIC_PREFIX + code, {
-        type: 'user_joined',
-        user: { id: myId, name: myName },
-        from: myId
+      sendSignal({
+        event: 'request-join',
+        from_peer_id: myId,
+        user_name: myName,
+        room_code: code,
       });
-    }, 400);
+    }, 500);
 
-    addToast(`✅ Joined Study Room ${code}! Connected via live cloud audio.`, 'success');
-    return placeholder;
+    addToast(`🔔 Knock sent! Waiting for host to approve your request...`, 'info');
+    return waitRoom;
   };
 
-  // ── Leave Room ─────────────────────────────────────────────────────────────
+  // ── Leave Voice Room ───────────────────────────────────────────────────────
   const leaveRoom = () => {
     if (currentRoomRef.current) {
       const code = currentRoomRef.current.room_code;
-      // Tell other peers we left
-      publishMsg(SIGNAL_TOPIC_PREFIX + code, {
-        type: 'user_left',
-        from: myIdRef.current
+      sendSignal({
+        event: 'leave-room',
+        from_peer_id: myPeerIdRef.current,
+        room_code: code,
       });
-      // If host, close room globally
-      if (currentRoomRef.current.host_id === myIdRef.current) {
-        publishMsg(GLOBAL_ROOMS_TOPIC, {
+
+      if (currentRoomRef.current.host_id === myPeerIdRef.current) {
+        publishSignal(GLOBAL_ROOMS_TOPIC, {
           action: 'close',
-          room_code: code
+          room_code: code,
         });
       }
     }
+    playChime('leave');
     cleanup();
-    addToast('Left voice study room.', 'info');
+    addToast('Disconnected from voice room.', 'info');
   };
 
   // ── Mute / Deafen ──────────────────────────────────────────────────────────
@@ -550,10 +721,11 @@ export function VoiceRoomProvider({ children }) {
       created_at: new Date().toISOString()
     };
     setChatMessages(prev => [...prev, msg]);
-    publishMsg(SIGNAL_TOPIC_PREFIX + currentRoomRef.current.room_code, {
-      type: 'chat',
+    sendSignal({
+      event: 'chat',
       message: msg,
-      from: myIdRef.current
+      from_peer_id: myPeerIdRef.current,
+      room_code: currentRoomRef.current.room_code,
     });
   };
 
@@ -561,6 +733,8 @@ export function VoiceRoomProvider({ children }) {
     <VoiceRoomContext.Provider value={{
       currentRoom, participants, isMuted, isDeafened,
       activeSpeakers, chatMessages, connectionStatus,
+      joinRequests, approveJoinRequest, denyJoinRequest,
+      autoAdmit, setAutoAdmit,
       createRoom, joinRoom, leaveRoom,
       toggleMute, toggleDeafen, sendChatMessage,
     }}>

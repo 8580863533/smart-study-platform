@@ -5,7 +5,7 @@ import { useVoiceRoom, getStoredRooms } from '../context/VoiceRoomContext';
 import { useStudy } from '../context/StudyContext';
 import { useToast } from '../hooks/useToast';
 
-const GLOBAL_ROOMS_TOPIC = 'study_global_voice_rooms_v1';
+const GLOBAL_ROOMS_TOPIC = 'study_global_voice_rooms_v2';
 
 export default function VoiceRoomsPage() {
   const {
@@ -16,6 +16,11 @@ export default function VoiceRoomsPage() {
     activeSpeakers,
     chatMessages,
     connectionStatus,
+    joinRequests,
+    approveJoinRequest,
+    denyJoinRequest,
+    autoAdmit,
+    setAutoAdmit,
     createRoom,
     joinRoom,
     leaveRoom,
@@ -31,13 +36,15 @@ export default function VoiceRoomsPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [selectedDocId, setSelectedDocId] = useState('');
+  const [autoAdmitCheckbox, setAutoAdmitCheckbox] = useState(true);
   const [joinCodeInput, setJoinCodeInput] = useState('');
   const [chatInput, setChatInput] = useState('');
+  const [copiedCode, setCopiedCode] = useState(false);
   const chatEndRef = useRef(null);
 
   useEffect(() => { loadDocuments(); }, []);
 
-  // ── Fetch Global Active Rooms from cloud across all laptops ─────────────────
+  // ── Fetch Global Active Rooms from cloud across all devices ────────────────
   const fetchGlobalRooms = useCallback(async () => {
     try {
       const res = await fetch(`https://ntfy.sh/${GLOBAL_ROOMS_TOPIC}/json?poll=1`);
@@ -45,7 +52,7 @@ export default function VoiceRoomsPage() {
       const lines = text.trim().split('\n').filter(Boolean);
       const roomsMap = new Map();
 
-      // Start with stored & preset rooms
+      // Read locally stored and preset rooms
       const local = getStoredRooms();
       local.forEach(r => roomsMap.set(r.room_code, r));
 
@@ -72,7 +79,6 @@ export default function VoiceRoomsPage() {
   useEffect(() => {
     fetchGlobalRooms();
 
-    // Listen for real-time room creation/closure across all laptops
     let es;
     try {
       es = new EventSource(`https://ntfy.sh/${GLOBAL_ROOMS_TOPIC}/sse`);
@@ -95,17 +101,13 @@ export default function VoiceRoomsPage() {
       };
     } catch (e) {}
 
-    return () => {
-      if (es) es.close();
-    };
+    return () => { if (es) es.close(); };
   }, [fetchGlobalRooms]);
 
-  // Refresh rooms list whenever user joins/leaves
   useEffect(() => {
     fetchGlobalRooms();
   }, [currentRoom, fetchGlobalRooms]);
 
-  // Scroll chat to bottom on new messages
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages]);
@@ -113,7 +115,7 @@ export default function VoiceRoomsPage() {
   const handleCreateSubmit = async (e) => {
     e.preventDefault();
     if (!newTitle.trim()) { addToast('Please enter a room title.', 'warning'); return; }
-    const room = await createRoom(newTitle, selectedDocId);
+    const room = await createRoom(newTitle, selectedDocId, autoAdmitCheckbox);
     if (room) {
       setShowCreateModal(false);
       setNewTitle('');
@@ -129,6 +131,15 @@ export default function VoiceRoomsPage() {
     setJoinCodeInput('');
   };
 
+  const handleCopyCode = (code) => {
+    try {
+      navigator.clipboard.writeText(code);
+      setCopiedCode(true);
+      addToast(`Copied room code: ${code}`, 'success');
+      setTimeout(() => setCopiedCode(false), 2000);
+    } catch (e) {}
+  };
+
   const handleSendChat = (e) => {
     e.preventDefault();
     if (!chatInput.trim()) return;
@@ -136,108 +147,325 @@ export default function VoiceRoomsPage() {
     setChatInput('');
   };
 
-  const statusColors = { connected: '#3ecfcf', connecting: '#f0c040', disconnected: '#ff4d4d' };
-  const statusLabel = { connected: '🟢 Connected Live', connecting: '🟡 Connecting…', disconnected: '🔴 Disconnected' };
+  // Up to 6 slots representation for Discord-style grid
+  const MAX_SLOTS = 6;
+  const slots = Array.from({ length: MAX_SLOTS }, (_, i) => participants[i] || null);
 
   return (
-    <div style={{ minHeight: '100vh', background: 'radial-gradient(ellipse at top, #0d0d2b 0%, #050510 100%)', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ minHeight: '100vh', background: 'radial-gradient(ellipse at top, #0f1026 0%, #060714 100%)', display: 'flex', flexDirection: 'column' }}>
       <Navbar />
       <div style={{ display: 'flex', flex: 1 }}>
         <Sidebar />
 
-        <main style={{ flex: 1, padding: '32px', maxWidth: '1200px', margin: '0 auto', width: '100%', boxSizing: 'border-box' }}>
+        <main style={{ flex: 1, padding: '28px 36px', maxWidth: '1300px', margin: '0 auto', width: '100%', boxSizing: 'border-box' }}>
 
-          {/* ── In-Room Panel ─────────────────────────────────── */}
-          {currentRoom ? (
+          {/* ── Waiting for Host Approval Screen (Joiner view) ── */}
+          {connectionStatus === 'waiting_approval' && (
+            <div style={{
+              background: 'rgba(15, 16, 38, 0.95)',
+              border: '1px solid rgba(62, 207, 207, 0.4)',
+              borderRadius: '24px',
+              padding: '48px 32px',
+              textAlign: 'center',
+              maxWidth: '520px',
+              margin: '60px auto',
+              boxShadow: '0 0 50px rgba(62, 207, 207, 0.15)',
+            }}>
+              <div style={{ fontSize: '3.5rem', marginBottom: '16px', animation: 'bounce 1.5s infinite' }}>🔔</div>
+              <h2 style={{ fontSize: '1.5rem', fontWeight: 800, marginBottom: '8px', color: '#fff' }}>
+                Join Request Sent to Host!
+              </h2>
+              <p style={{ color: 'rgba(240, 240, 255, 0.65)', fontSize: '0.95rem', marginBottom: '24px', lineHeight: 1.6 }}>
+                You have knocked on Room <strong>{currentRoom?.room_code}</strong>. The host received a notification to admit you into the room.
+              </p>
+
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', color: '#3ecfcf', fontSize: '0.9rem', marginBottom: '32px' }}>
+                <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: '#3ecfcf', animation: 'ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite' }} />
+                <span>Waiting for host approval...</span>
+              </div>
+
+              <button
+                onClick={leaveRoom}
+                className="btn btn-secondary"
+                style={{ padding: '10px 28px', borderRadius: '12px', fontWeight: 600 }}
+              >
+                Cancel Request
+              </button>
+            </div>
+          )}
+
+          {/* ── Active Connected Room (Discord-Style UI) ──────── */}
+          {currentRoom && connectionStatus === 'connected' && (
             <div>
-              {/* Room Header */}
-              <div className="glass-card" style={{ padding: '28px 32px', borderRadius: '24px', marginBottom: '24px', border: '1px solid rgba(62,207,207,0.35)', boxShadow: '0 0 30px rgba(62,207,207,0.12)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '16px' }}>
-                  <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '6px' }}>
-                      <span style={{ fontSize: '1.8rem' }}>🎙️</span>
-                      <h1 style={{ fontSize: '1.6rem', fontWeight: 800, margin: 0 }}>{currentRoom.title}</h1>
-                    </div>
-                    <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', alignItems: 'center' }}>
-                      <span style={{ color: statusColors[connectionStatus] || '#3ecfcf', fontWeight: 700, fontSize: '0.9rem' }}>
-                        {statusLabel[connectionStatus] || '🟢 Connected Live'}
-                      </span>
-                      <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.85rem' }}>
-                        Room Code: <strong style={{ color: '#3ecfcf', letterSpacing: '2px', fontSize: '1.05rem' }}>{currentRoom.room_code}</strong>
-                      </span>
-                      <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.85rem' }}>
-                        👥 {participants.length}/{currentRoom.max_participants || 6}
-                      </span>
-                    </div>
-                    <div style={{ marginTop: '10px', padding: '8px 16px', background: 'rgba(62,207,207,0.1)', borderRadius: '10px', border: '1px solid rgba(62,207,207,0.2)', display: 'inline-block', fontSize: '0.85rem', color: '#3ecfcf' }}>
-                      📋 Share code <strong>{currentRoom.room_code}</strong> with your classmates on any laptop or phone to join!
+              {/* Host Notification Banner: Pending Join Requests */}
+              {joinRequests.length > 0 && (
+                <div style={{
+                  background: 'linear-gradient(135deg, rgba(108, 99, 255, 0.25) 0%, rgba(62, 207, 207, 0.25) 100%)',
+                  border: '1px solid #3ecfcf',
+                  borderRadius: '18px',
+                  padding: '16px 24px',
+                  marginBottom: '20px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  flexWrap: 'wrap',
+                  gap: '12px',
+                  boxShadow: '0 0 25px rgba(62, 207, 207, 0.2)',
+                  animation: 'pulse 2s infinite'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <span style={{ fontSize: '1.5rem' }}>🔔</span>
+                    <div>
+                      <div style={{ fontWeight: 800, color: '#fff', fontSize: '0.95rem' }}>
+                        {joinRequests[0].userName} wants to join your voice room!
+                      </div>
+                      <div style={{ fontSize: '0.8rem', color: 'rgba(240, 240, 255, 0.6)' }}>
+                        Capacity: {participants.length}/6 members
+                      </div>
                     </div>
                   </div>
-
-                  {/* Controls */}
-                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <div style={{ display: 'flex', gap: '8px' }}>
                     <button
-                      onClick={toggleMute}
-                      className="btn"
-                      style={{ padding: '10px 20px', borderRadius: '12px', fontWeight: 700, fontSize: '0.9rem', background: isMuted ? 'rgba(255,77,77,0.2)' : 'rgba(62,207,207,0.15)', color: isMuted ? '#ff4d4d' : '#3ecfcf', border: isMuted ? '1px solid rgba(255,77,77,0.4)' : '1px solid rgba(62,207,207,0.35)' }}
+                      onClick={() => approveJoinRequest(joinRequests[0].peerId, joinRequests[0].userName)}
+                      className="btn btn-primary"
+                      style={{ padding: '8px 18px', borderRadius: '10px', fontWeight: 700, fontSize: '0.85rem' }}
                     >
-                      {isMuted ? '🔇 Unmute' : '🎤 Mute'}
+                      ✅ Admit / Accept
                     </button>
                     <button
-                      onClick={toggleDeafen}
-                      className="btn"
-                      style={{ padding: '10px 20px', borderRadius: '12px', fontWeight: 700, fontSize: '0.9rem', background: isDeafened ? 'rgba(255,165,0,0.2)' : 'rgba(108,99,255,0.15)', color: isDeafened ? '#ffa500' : '#6c63ff', border: isDeafened ? '1px solid rgba(255,165,0,0.4)' : '1px solid rgba(108,99,255,0.35)' }}
+                      onClick={() => denyJoinRequest(joinRequests[0].peerId)}
+                      className="btn btn-secondary"
+                      style={{ padding: '8px 16px', borderRadius: '10px', fontWeight: 600, fontSize: '0.85rem' }}
                     >
-                      {isDeafened ? '🔕 Undeafen' : '🔊 Deafen'}
-                    </button>
-                    <button
-                      onClick={leaveRoom}
-                      className="btn"
-                      style={{ padding: '10px 20px', borderRadius: '12px', fontWeight: 700, fontSize: '0.9rem', background: 'rgba(255,77,77,0.15)', color: '#ff4d4d', border: '1px solid rgba(255,77,77,0.3)' }}
-                    >
-                      🚪 Leave Room
+                      ❌ Decline
                     </button>
                   </div>
                 </div>
+              )}
+
+              {/* Discord-Style Channel Header */}
+              <div className="glass-card" style={{
+                padding: '24px 30px',
+                borderRadius: '20px',
+                marginBottom: '24px',
+                border: '1px solid rgba(62, 207, 207, 0.3)',
+                background: 'rgba(18, 19, 45, 0.75)',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                flexWrap: 'wrap',
+                gap: '16px'
+              }}>
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '4px' }}>
+                    <span style={{ fontSize: '1.6rem' }}>🔊</span>
+                    <h1 style={{ fontSize: '1.5rem', fontWeight: 800, margin: 0, color: '#fff' }}>{currentRoom.title}</h1>
+                    <span style={{
+                      fontSize: '0.75rem',
+                      background: 'rgba(62, 207, 207, 0.15)',
+                      color: '#3ecfcf',
+                      border: '1px solid rgba(62, 207, 207, 0.35)',
+                      padding: '3px 10px',
+                      borderRadius: '16px',
+                      fontWeight: 700
+                    }}>
+                      OPUS STEREO
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', gap: '16px', alignItems: 'center', flexWrap: 'wrap' }}>
+                    <span style={{ color: '#3ecfcf', fontSize: '0.85rem', fontWeight: 600 }}>
+                      🟢 Live Voice Room
+                    </span>
+                    <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.85rem' }}>
+                      Room Code: <strong style={{ color: '#fff', letterSpacing: '2px', fontSize: '1rem' }}>{currentRoom.room_code}</strong>
+                    </span>
+                    <button
+                      onClick={() => handleCopyCode(currentRoom.room_code)}
+                      style={{ background: 'rgba(255,255,255,0.08)', border: 'none', color: '#3ecfcf', padding: '3px 10px', borderRadius: '8px', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 700 }}
+                    >
+                      {copiedCode ? '✓ Copied!' : '📋 Copy Code'}
+                    </button>
+                    <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.85rem' }}>
+                      👥 {participants.length}/6 Members
+                    </span>
+                  </div>
+                </div>
+
+                {/* Discord Bar Controls */}
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <button
+                    onClick={toggleMute}
+                    style={{
+                      padding: '10px 18px',
+                      borderRadius: '12px',
+                      fontWeight: 700,
+                      fontSize: '0.88rem',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      background: isMuted ? 'rgba(255, 77, 77, 0.2)' : 'rgba(62, 207, 207, 0.15)',
+                      color: isMuted ? '#ff4d4d' : '#3ecfcf',
+                      border: isMuted ? '1px solid rgba(255, 77, 77, 0.4)' : '1px solid rgba(62, 207, 207, 0.35)'
+                    }}
+                  >
+                    <span>{isMuted ? '🔇' : '🎙️'}</span>
+                    <span>{isMuted ? 'Unmute' : 'Mute'}</span>
+                  </button>
+
+                  <button
+                    onClick={toggleDeafen}
+                    style={{
+                      padding: '10px 18px',
+                      borderRadius: '12px',
+                      fontWeight: 700,
+                      fontSize: '0.88rem',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      background: isDeafened ? 'rgba(255, 165, 0, 0.2)' : 'rgba(108, 99, 255, 0.15)',
+                      color: isDeafened ? '#ffa500' : '#6c63ff',
+                      border: isDeafened ? '1px solid rgba(255, 165, 0, 0.4)' : '1px solid rgba(108, 99, 255, 0.35)'
+                    }}
+                  >
+                    <span>{isDeafened ? '🔕' : '🎧'}</span>
+                    <span>{isDeafened ? 'Undeafen' : 'Deafen'}</span>
+                  </button>
+
+                  <button
+                    onClick={leaveRoom}
+                    style={{
+                      padding: '10px 20px',
+                      borderRadius: '12px',
+                      fontWeight: 700,
+                      fontSize: '0.88rem',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      background: 'rgba(255, 77, 77, 0.15)',
+                      color: '#ff4d4d',
+                      border: '1px solid rgba(255, 77, 77, 0.3)'
+                    }}
+                  >
+                    <span>📞</span>
+                    <span>Disconnect</span>
+                  </button>
+                </div>
               </div>
 
-              {/* Participants + Chat */}
+              {/* Main Content Area: 6-Member Grid + Live Chat */}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 380px', gap: '24px' }}>
 
-                {/* Participants Grid */}
+                {/* ── Discord 6-Member Grid ──────────────────────── */}
                 <div>
-                  <h2 style={{ fontSize: '1.1rem', fontWeight: 700, marginBottom: '16px', color: 'rgba(240,240,255,0.9)' }}>
-                    👥 Participants ({participants.length})
-                  </h2>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: '16px' }}>
-                    {participants.map((p) => {
-                      const isSpeaking = activeSpeakers[p.user_id];
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+                    <h2 style={{ fontSize: '1.05rem', fontWeight: 700, color: 'rgba(240, 240, 255, 0.85)' }}>
+                      👥 Voice Channel ({participants.length}/6)
+                    </h2>
+                    <label style={{ fontSize: '0.8rem', color: 'rgba(240, 240, 255, 0.6)', display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={autoAdmit}
+                        onChange={e => setAutoAdmit(e.target.checked)}
+                      />
+                      <span>Auto-admit new joiners</span>
+                    </label>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px' }}>
+                    {slots.map((p, idx) => {
+                      if (p) {
+                        const isSpeaking = activeSpeakers[p.user_id];
+                        const isHost = currentRoom?.host_id === p.user_id || p.user_name?.includes('(Host)');
+
+                        return (
+                          <div
+                            key={p.id || p.user_id}
+                            style={{
+                              background: 'rgba(25, 27, 60, 0.65)',
+                              border: isSpeaking ? '2.5px solid #23a55a' : '1px solid rgba(255, 255, 255, 0.1)',
+                              borderRadius: '20px',
+                              padding: '28px 16px',
+                              textAlign: 'center',
+                              position: 'relative',
+                              boxShadow: isSpeaking ? '0 0 25px rgba(35, 165, 90, 0.45)' : 'none',
+                              transition: 'all 0.15s ease',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              minHeight: '170px'
+                            }}
+                          >
+                            {/* Host Crown */}
+                            {isHost && (
+                              <span style={{ position: 'absolute', top: '10px', left: '12px', fontSize: '0.85rem' }} title="Room Host">
+                                👑
+                              </span>
+                            )}
+
+                            {/* Speaking Icon */}
+                            <span style={{ position: 'absolute', top: '10px', right: '12px', fontSize: '0.8rem' }}>
+                              {p.is_muted ? '🔇' : isSpeaking ? '🔊' : '🎧'}
+                            </span>
+
+                            {/* Avatar with Discord-style Green Halo */}
+                            <div style={{
+                              width: '64px',
+                              height: '64px',
+                              borderRadius: '50%',
+                              background: isSpeaking ? '#23a55a' : 'linear-gradient(135deg, #6c63ff 0%, #3ecfcf 100%)',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              fontSize: '1.6rem',
+                              fontWeight: 800,
+                              color: '#fff',
+                              marginBottom: '12px',
+                              boxShadow: isSpeaking ? '0 0 0 4px rgba(35, 165, 90, 0.35)' : 'none',
+                              transition: 'all 0.15s ease'
+                            }}>
+                              {p.user_name ? p.user_name.charAt(0).toUpperCase() : 'U'}
+                            </div>
+
+                            <div style={{ fontWeight: 700, fontSize: '0.92rem', color: '#fff', maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {p.user_name}
+                            </div>
+
+                            <div style={{ fontSize: '0.72rem', color: isSpeaking ? '#23a55a' : 'rgba(240, 240, 255, 0.45)', marginTop: '4px', fontWeight: 600 }}>
+                              {p.is_muted ? 'Muted' : isSpeaking ? 'Speaking...' : 'Connected'}
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      // Empty Slot (up to 6)
                       return (
-                        <div key={p.id || p.user_id} style={{
-                          background: 'rgba(255,255,255,0.05)',
-                          border: isSpeaking ? '2px solid #3ecfcf' : '1px solid rgba(255,255,255,0.1)',
-                          borderRadius: '16px',
-                          padding: '20px 14px',
-                          textAlign: 'center',
-                          boxShadow: isSpeaking ? '0 0 20px rgba(62,207,207,0.3)' : 'none',
-                          transition: 'all 0.2s ease'
-                        }}>
-                          <div style={{
-                            width: '52px', height: '52px',
-                            borderRadius: '50%',
-                            background: isSpeaking ? 'linear-gradient(135deg,#3ecfcf,#6c63ff)' : 'rgba(108,99,255,0.3)',
-                            display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            margin: '0 auto 10px',
-                            fontSize: '1.3rem',
-                            transition: 'all 0.2s ease'
-                          }}>
-                            {p.is_muted ? '🔇' : isSpeaking ? '🎤' : '🎧'}
+                        <div
+                          key={`empty-slot-${idx}`}
+                          style={{
+                            background: 'rgba(255, 255, 255, 0.02)',
+                            border: '1.5px dashed rgba(255, 255, 255, 0.12)',
+                            borderRadius: '20px',
+                            padding: '24px 16px',
+                            textAlign: 'center',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            minHeight: '170px'
+                          }}
+                        >
+                          <div style={{ width: '48px', height: '48px', borderRadius: '50%', background: 'rgba(255, 255, 255, 0.04)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255, 255, 255, 0.25)', fontSize: '1.2rem', marginBottom: '8px' }}>
+                            +
                           </div>
-                          <div style={{ fontSize: '0.85rem', fontWeight: 600, color: '#fff', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {p.user_name}
+                          <div style={{ fontSize: '0.8rem', color: 'rgba(240, 240, 255, 0.4)', fontWeight: 600 }}>
+                            Empty Slot {idx + 1}/6
                           </div>
-                          <div style={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.4)', marginTop: '4px' }}>
-                            {p.is_muted ? 'Muted' : isSpeaking ? 'Speaking' : 'Listening'}
+                          <div style={{ fontSize: '0.7rem', color: 'rgba(240, 240, 255, 0.25)', marginTop: '4px' }}>
+                            Share code <strong>{currentRoom.room_code}</strong>
                           </div>
                         </div>
                       );
@@ -245,39 +473,69 @@ export default function VoiceRoomsPage() {
                   </div>
                 </div>
 
-                {/* Chat */}
-                <div className="glass-card" style={{ borderRadius: '20px', padding: '20px', border: '1px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', maxHeight: '420px' }}>
-                  <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '14px' }}>💬 Room Chat</h3>
+                {/* ── Discord Live In-Room Chat ──────────────────── */}
+                <div className="glass-card" style={{
+                  borderRadius: '20px',
+                  padding: '20px',
+                  border: '1px solid rgba(255, 255, 255, 0.08)',
+                  background: 'rgba(18, 19, 45, 0.75)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  maxHeight: '440px'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '14px', borderBottom: '1px solid rgba(255, 255, 255, 0.06)', paddingBottom: '10px' }}>
+                    <span>💬</span>
+                    <h3 style={{ fontSize: '0.95rem', fontWeight: 700, margin: 0, color: '#fff' }}>Room Text Channel</h3>
+                  </div>
+
                   <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '14px', paddingRight: '4px' }}>
                     {chatMessages.length === 0 ? (
-                      <div style={{ color: 'rgba(255,255,255,0.3)', textAlign: 'center', marginTop: '30px', fontSize: '0.85rem' }}>
-                        No messages yet. Say hello to your study partners! 👋
+                      <div style={{ color: 'rgba(255, 255, 255, 0.35)', textAlign: 'center', marginTop: '40px', fontSize: '0.85rem' }}>
+                        Welcome to #{currentRoom.title}! Send a message to chat while you talk. 👋
                       </div>
                     ) : chatMessages.map((msg) => (
-                      <div key={msg.id} style={{ background: 'rgba(255,255,255,0.04)', borderRadius: '10px', padding: '8px 12px' }}>
-                        <div style={{ fontSize: '0.75rem', color: '#3ecfcf', fontWeight: 600, marginBottom: '3px' }}>{msg.sender_name}</div>
-                        <div style={{ fontSize: '0.85rem', color: 'rgba(240,240,255,0.85)' }}>{msg.content}</div>
+                      <div key={msg.id} style={{ background: 'rgba(255, 255, 255, 0.04)', borderRadius: '12px', padding: '10px 14px' }}>
+                        <div style={{ fontSize: '0.75rem', color: '#3ecfcf', fontWeight: 700, marginBottom: '2px', display: 'flex', justifyContent: 'space-between' }}>
+                          <span>{msg.sender_name}</span>
+                          <span style={{ color: 'rgba(255,255,255,0.3)', fontWeight: 400 }}>
+                            {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                        </div>
+                        <div style={{ fontSize: '0.88rem', color: 'rgba(240, 240, 255, 0.9)', lineHeight: 1.4 }}>{msg.content}</div>
                       </div>
                     ))}
                     <div ref={chatEndRef} />
                   </div>
+
                   <form onSubmit={handleSendChat} style={{ display: 'flex', gap: '8px' }}>
                     <input
                       type="text"
                       value={chatInput}
                       onChange={e => setChatInput(e.target.value)}
-                      placeholder="Type a message…"
-                      style={{ flex: 1, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '10px', padding: '10px 14px', color: '#fff', outline: 'none', fontSize: '0.85rem' }}
+                      placeholder="Message in study room..."
+                      style={{
+                        flex: 1,
+                        background: 'rgba(255, 255, 255, 0.06)',
+                        border: '1px solid rgba(255, 255, 255, 0.12)',
+                        borderRadius: '10px',
+                        padding: '10px 14px',
+                        color: '#fff',
+                        outline: 'none',
+                        fontSize: '0.85rem'
+                      }}
                     />
-                    <button type="submit" className="btn btn-primary" style={{ padding: '10px 14px', borderRadius: '10px', fontWeight: 700 }}>
+                    <button type="submit" className="btn btn-primary" style={{ padding: '10px 16px', borderRadius: '10px', fontWeight: 700 }}>
                       Send
                     </button>
                   </form>
                 </div>
+
               </div>
             </div>
-          ) : (
-            /* ── Browse / Join Room View ───────────────────────── */
+          )}
+
+          {/* ── Browse / Join Room Landing View ───────────────── */}
+          {(!currentRoom || connectionStatus === 'disconnected') && (
             <div>
               {/* Header */}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '28px', flexWrap: 'wrap', gap: '16px' }}>
@@ -289,19 +547,25 @@ export default function VoiceRoomsPage() {
                     </span>
                   </h1>
                   <p style={{ color: 'rgba(240,240,255,0.55)', fontSize: '0.95rem' }}>
-                    Study live with classmates using real-time voice & audio. Create a room or join by entering the 6-digit code.
+                    Discord-style peer voice channels. Connect with study partners from any laptop, tablet, or phone.
                   </p>
                 </div>
-                <button onClick={() => setShowCreateModal(true)} className="btn btn-primary" style={{ padding: '12px 24px', borderRadius: '14px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <button
+                  onClick={() => setShowCreateModal(true)}
+                  className="btn btn-primary"
+                  style={{ padding: '12px 24px', borderRadius: '14px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}
+                >
                   ➕ Create Voice Room
                 </button>
               </div>
 
-              {/* Join by Code */}
-              <div className="glass-card" style={{ padding: '24px 28px', borderRadius: '20px', marginBottom: '28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '16px', border: '1px solid rgba(108,99,255,0.2)' }}>
+              {/* Join by Code Card */}
+              <div className="glass-card" style={{ padding: '24px 28px', borderRadius: '20px', marginBottom: '28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '16px', border: '1px solid rgba(108,99,255,0.25)' }}>
                 <div>
-                  <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '4px' }}>🔑 Have a Room Code?</h3>
-                  <p style={{ fontSize: '0.85rem', color: 'rgba(240,240,255,0.5)', margin: 0 }}>Enter the 6-digit code shared by your classmate to join their room instantly from any laptop.</p>
+                  <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '4px' }}>🔑 Enter a 6-Digit Room Code</h3>
+                  <p style={{ fontSize: '0.85rem', color: 'rgba(240,240,255,0.5)', margin: 0 }}>
+                    Enter the code shared by your classmate. The host will get a join request to admit you into the room.
+                  </p>
                 </div>
                 <form onSubmit={handleJoinByCode} style={{ display: 'flex', gap: '10px' }}>
                   <input
@@ -392,13 +656,13 @@ export default function VoiceRoomsPage() {
 
               {/* How it works */}
               <div className="glass-card" style={{ marginTop: '32px', padding: '24px 28px', borderRadius: '20px', border: '1px solid rgba(255,255,255,0.06)' }}>
-                <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '14px', color: 'rgba(240,240,255,0.8)' }}>🛈 How Voice Rooms Work</h3>
+                <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '14px', color: 'rgba(240,240,255,0.8)' }}>🛈 How Discord-Style Voice Rooms Work</h3>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px,1fr))', gap: '16px' }}>
                   {[
-                    { icon: '➕', title: 'Create a room', desc: 'Click "Create Voice Room", enter a study topic, and get a 6-digit code.' },
-                    { icon: '📤', title: 'Share the code', desc: 'Send the 6-digit code to classmates on WhatsApp, text, etc.' },
-                    { icon: '🔑', title: 'Join from any device', desc: 'Classmates enter the code on any other laptop, tablet, or phone to join instantly.' },
-                    { icon: '🎤', title: 'Real-time live audio', desc: 'Direct peer-to-peer voice and chat that works anywhere without needing your local computer on.' },
+                    { icon: '➕', title: '1. Create a room', desc: 'Click Create Voice Room and get your 6-digit room code.' },
+                    { icon: '📤', title: '2. Share with classmates', desc: 'Share the code on WhatsApp or text with up to 5 classmates.' },
+                    { icon: '🔔', title: '3. Host approves join', desc: 'When someone joins with the code, the host receives a request to admit them.' },
+                    { icon: '🎧', title: '4. Talk live like Discord', desc: 'Crystal-clear Opus audio with noise cancellation and active speaker green halos.' },
                   ].map(s => (
                     <div key={s.title} style={{ background: 'rgba(255,255,255,0.03)', borderRadius: '12px', padding: '14px 16px' }}>
                       <div style={{ fontSize: '1.4rem', marginBottom: '6px' }}>{s.icon}</div>
@@ -413,7 +677,7 @@ export default function VoiceRoomsPage() {
 
           {/* ── Create Room Modal ─────────────────────────────── */}
           {showCreateModal && (
-            <div style={{ position: 'fixed', inset: 0, background: 'rgba(5,5,16,0.82)', backdropFilter: 'blur(12px)', zIndex: 10000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
+            <div style={{ position: 'fixed', inset: 0, background: 'rgba(5,5,16,0.85)', backdropFilter: 'blur(12px)', zIndex: 10000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
               <div className="glass-card" style={{ width: '100%', maxWidth: '460px', padding: '36px', borderRadius: '28px', border: '1px solid rgba(108,99,255,0.3)' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
                   <h2 style={{ fontSize: '1.35rem', fontWeight: 800 }}>🎙️ Start a Voice Room</h2>
@@ -446,8 +710,21 @@ export default function VoiceRoomsPage() {
                     </select>
                   </div>
 
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: 'rgba(255,255,255,0.04)', padding: '12px 16px', borderRadius: '12px' }}>
+                    <input
+                      type="checkbox"
+                      id="autoAdmitCheck"
+                      checked={autoAdmitCheckbox}
+                      onChange={e => setAutoAdmitCheckbox(e.target.checked)}
+                      style={{ cursor: 'pointer' }}
+                    />
+                    <label htmlFor="autoAdmitCheck" style={{ fontSize: '0.85rem', color: 'rgba(240,240,255,0.85)', cursor: 'pointer' }}>
+                      <strong>Auto-admit classmates</strong> (automatically admit users who enter the room code)
+                    </label>
+                  </div>
+
                   <div style={{ background: 'rgba(62,207,207,0.08)', padding: '12px 16px', borderRadius: '12px', border: '1px solid rgba(62,207,207,0.2)', fontSize: '0.82rem', color: '#3ecfcf' }}>
-                    ✅ Your room will be visible and joinable from <strong>any other laptop</strong> instantly via the 6-digit code.
+                    👥 Max 6 members. Supports peer learning with live audio, speaking detection, and in-room chat.
                   </div>
 
                   <div style={{ display: 'flex', gap: '12px', marginTop: '6px' }}>
@@ -461,6 +738,15 @@ export default function VoiceRoomsPage() {
 
         </main>
       </div>
+
+      <style>{`
+        @keyframes ping {
+          75%, 100% {
+            transform: scale(2);
+            opacity: 0;
+          }
+        }
+      `}</style>
     </div>
   );
 }
