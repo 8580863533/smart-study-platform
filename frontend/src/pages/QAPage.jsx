@@ -10,7 +10,7 @@ import { answerQuestionFromText } from '../utils/aiEngine';
 
 export default function QAPage() {
   const { docId } = useParams();
-  const { documents, activeDocument, setActiveDocument, loadDocuments } = useStudy();
+  const { documents, activeDocument, setActiveDocument, loadDocuments, ensureDocumentContent } = useStudy();
   const { addToast } = useToast();
   
   const [selectedDocId, setSelectedDocId] = useState('');
@@ -26,13 +26,16 @@ export default function QAPage() {
     if (docId) {
       setSelectedDocId(docId);
       loadHistory(docId);
+      ensureDocumentContent(docId);
     } else if (activeDocument) {
       setSelectedDocId(activeDocument.id);
       loadHistory(activeDocument.id);
+      ensureDocumentContent(activeDocument.id);
     } else if (documents.length > 0) {
       setSelectedDocId(documents[0].id);
       setActiveDocument(documents[0]);
       loadHistory(documents[0].id);
+      ensureDocumentContent(documents[0].id);
     }
   }, [docId, activeDocument, documents]);
 
@@ -77,6 +80,7 @@ export default function QAPage() {
     const doc = documents.find(d => d.id === id);
     if (doc) {
       setActiveDocument(doc);
+      ensureDocumentContent(id);
     }
     setChatHistory([]);
     loadHistory(id);
@@ -101,16 +105,26 @@ export default function QAPage() {
       return updated;
     });
 
-    // ── Answer INSTANTLY from local document content ──────────────────
-    // No loading spinner — answer in milliseconds from the uploaded PDF text
-    const doc = documents.find(d => d.id === selectedDocId) || activeDocument;
-    const docContent = doc?.content || '';
+    // ── Get document content (fetch if opened on another laptop) ────────
+    let doc = documents.find(d => d.id === selectedDocId) || activeDocument;
+    let docContent = doc?.content || '';
+
+    if (!docContent || docContent.trim().length < 10) {
+      docContent = await ensureDocumentContent(selectedDocId);
+    }
+
+    if (!docContent || docContent.trim().length < 10) {
+      const anyWithContent = documents.find(d => d.content && d.content.trim().length > 20);
+      if (anyWithContent) {
+        docContent = anyWithContent.content;
+      }
+    }
 
     if (!docContent || docContent.trim().length < 10) {
       const noDocMsg = {
         sender: 'ai',
-        text: 'No document content found. Please upload a PDF or text file first, then ask your question.',
-        confidence: 1.0,
+        text: 'Document content is still synchronizing. Please try again in a few seconds or check that your notes contain text.',
+        confidence: 0.5,
         source: '',
         timestamp: new Date().toISOString()
       };
@@ -135,9 +149,9 @@ export default function QAPage() {
       localStorage.setItem(`qa_history_${selectedDocId}`, JSON.stringify(updated));
       return updated;
     });
-    addToast('Answered from your notes! +5 XP', 'success');
+    addToast('Answered from notes! +5 XP', 'success');
 
-    // Sync to backend in background (non-blocking, won't affect UI)
+    // Sync to backend in background
     qaAPI.ask(selectedDocId, currentQuestion).catch(() => {});
   };
 

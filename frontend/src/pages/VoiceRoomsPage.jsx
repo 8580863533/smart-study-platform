@@ -1,9 +1,11 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Navbar from '../components/Navbar';
 import Sidebar from '../components/Sidebar';
 import { useVoiceRoom, getStoredRooms } from '../context/VoiceRoomContext';
 import { useStudy } from '../context/StudyContext';
 import { useToast } from '../hooks/useToast';
+
+const GLOBAL_ROOMS_TOPIC = 'study_global_voice_rooms_v1';
 
 export default function VoiceRoomsPage() {
   const {
@@ -35,17 +37,78 @@ export default function VoiceRoomsPage() {
 
   useEffect(() => { loadDocuments(); }, []);
 
+  // ── Fetch Global Active Rooms from cloud across all laptops ─────────────────
+  const fetchGlobalRooms = useCallback(async () => {
+    try {
+      const res = await fetch(`https://ntfy.sh/${GLOBAL_ROOMS_TOPIC}/json?poll=1`);
+      const text = await res.text();
+      const lines = text.trim().split('\n').filter(Boolean);
+      const roomsMap = new Map();
+
+      // Start with stored & preset rooms
+      const local = getStoredRooms();
+      local.forEach(r => roomsMap.set(r.room_code, r));
+
+      for (const line of lines) {
+        try {
+          const item = JSON.parse(line);
+          if (item && item.message) {
+            const data = JSON.parse(item.message);
+            if (data.action === 'create' && data.room) {
+              roomsMap.set(data.room.room_code, { ...data.room, is_live: true });
+            } else if (data.action === 'close' && data.room_code) {
+              roomsMap.delete(data.room_code);
+            }
+          }
+        } catch (e) {}
+      }
+      setActiveRooms(Array.from(roomsMap.values()));
+    } catch (err) {
+      console.warn("Could not fetch remote rooms:", err);
+      setActiveRooms(getStoredRooms());
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchGlobalRooms();
+
+    // Listen for real-time room creation/closure across all laptops
+    let es;
+    try {
+      es = new EventSource(`https://ntfy.sh/${GLOBAL_ROOMS_TOPIC}/sse`);
+      es.onmessage = (event) => {
+        try {
+          const item = JSON.parse(event.data);
+          if (item && item.message) {
+            const data = JSON.parse(item.message);
+            if (data.action === 'create' && data.room) {
+              setActiveRooms(prev => {
+                const map = new Map(prev.map(r => [r.room_code, r]));
+                map.set(data.room.room_code, { ...data.room, is_live: true });
+                return Array.from(map.values());
+              });
+            } else if (data.action === 'close' && data.room_code) {
+              setActiveRooms(prev => prev.filter(r => r.room_code !== data.room_code));
+            }
+          }
+        } catch (e) {}
+      };
+    } catch (e) {}
+
+    return () => {
+      if (es) es.close();
+    };
+  }, [fetchGlobalRooms]);
+
   // Refresh rooms list whenever user joins/leaves
   useEffect(() => {
-    setActiveRooms(getStoredRooms());
-  }, [currentRoom]);
+    fetchGlobalRooms();
+  }, [currentRoom, fetchGlobalRooms]);
 
   // Scroll chat to bottom on new messages
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages]);
-
-  const handleRefresh = () => setActiveRooms(getStoredRooms());
 
   const handleCreateSubmit = async (e) => {
     e.preventDefault();
@@ -55,7 +118,7 @@ export default function VoiceRoomsPage() {
       setShowCreateModal(false);
       setNewTitle('');
       setSelectedDocId('');
-      setActiveRooms(getStoredRooms());
+      fetchGlobalRooms();
     }
   };
 
@@ -64,7 +127,6 @@ export default function VoiceRoomsPage() {
     if (!joinCodeInput.trim()) { addToast('Please enter the 6-digit room code.', 'warning'); return; }
     await joinRoom(joinCodeInput.trim());
     setJoinCodeInput('');
-    setTimeout(() => setActiveRooms(getStoredRooms()), 300);
   };
 
   const handleSendChat = (e) => {
@@ -75,7 +137,7 @@ export default function VoiceRoomsPage() {
   };
 
   const statusColors = { connected: '#3ecfcf', connecting: '#f0c040', disconnected: '#ff4d4d' };
-  const statusLabel = { connected: '🟢 Connected', connecting: '🟡 Connecting…', disconnected: '🔴 Disconnected' };
+  const statusLabel = { connected: '🟢 Connected Live', connecting: '🟡 Connecting…', disconnected: '🔴 Disconnected' };
 
   return (
     <div style={{ minHeight: '100vh', background: 'radial-gradient(ellipse at top, #0d0d2b 0%, #050510 100%)', display: 'flex', flexDirection: 'column' }}>
@@ -98,17 +160,17 @@ export default function VoiceRoomsPage() {
                     </div>
                     <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', alignItems: 'center' }}>
                       <span style={{ color: statusColors[connectionStatus] || '#3ecfcf', fontWeight: 700, fontSize: '0.9rem' }}>
-                        {statusLabel[connectionStatus] || '🟢 Connected'}
+                        {statusLabel[connectionStatus] || '🟢 Connected Live'}
                       </span>
                       <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.85rem' }}>
-                        Code: <strong style={{ color: '#3ecfcf', letterSpacing: '2px' }}>{currentRoom.room_code}</strong>
+                        Room Code: <strong style={{ color: '#3ecfcf', letterSpacing: '2px', fontSize: '1.05rem' }}>{currentRoom.room_code}</strong>
                       </span>
                       <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.85rem' }}>
-                        👥 {participants.length}/{currentRoom.max_participants}
+                        👥 {participants.length}/{currentRoom.max_participants || 6}
                       </span>
                     </div>
-                    <div style={{ marginTop: '10px', padding: '8px 16px', background: 'rgba(62,207,207,0.1)', borderRadius: '10px', border: '1px solid rgba(62,207,207,0.2)', display: 'inline-block', fontSize: '0.8rem', color: '#3ecfcf' }}>
-                      📋 Share code <strong>{currentRoom.room_code}</strong> with your classmates so they can join!
+                    <div style={{ marginTop: '10px', padding: '8px 16px', background: 'rgba(62,207,207,0.1)', borderRadius: '10px', border: '1px solid rgba(62,207,207,0.2)', display: 'inline-block', fontSize: '0.85rem', color: '#3ecfcf' }}>
+                      📋 Share code <strong>{currentRoom.room_code}</strong> with your classmates on any laptop or phone to join!
                     </div>
                   </div>
 
@@ -189,7 +251,7 @@ export default function VoiceRoomsPage() {
                   <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '14px', paddingRight: '4px' }}>
                     {chatMessages.length === 0 ? (
                       <div style={{ color: 'rgba(255,255,255,0.3)', textAlign: 'center', marginTop: '30px', fontSize: '0.85rem' }}>
-                        No messages yet. Say hello! 👋
+                        No messages yet. Say hello to your study partners! 👋
                       </div>
                     ) : chatMessages.map((msg) => (
                       <div key={msg.id} style={{ background: 'rgba(255,255,255,0.04)', borderRadius: '10px', padding: '8px 12px' }}>
@@ -227,7 +289,7 @@ export default function VoiceRoomsPage() {
                     </span>
                   </h1>
                   <p style={{ color: 'rgba(240,240,255,0.55)', fontSize: '0.95rem' }}>
-                    Study live with classmates using real-time voice. Create a room and share the 6-digit code.
+                    Study live with classmates using real-time voice & audio. Create a room or join by entering the 6-digit code.
                   </p>
                 </div>
                 <button onClick={() => setShowCreateModal(true)} className="btn btn-primary" style={{ padding: '12px 24px', borderRadius: '14px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -239,16 +301,16 @@ export default function VoiceRoomsPage() {
               <div className="glass-card" style={{ padding: '24px 28px', borderRadius: '20px', marginBottom: '28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '16px', border: '1px solid rgba(108,99,255,0.2)' }}>
                 <div>
                   <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '4px' }}>🔑 Have a Room Code?</h3>
-                  <p style={{ fontSize: '0.85rem', color: 'rgba(240,240,255,0.5)', margin: 0 }}>Enter the 6-digit code your classmate shared to join their room on any device.</p>
+                  <p style={{ fontSize: '0.85rem', color: 'rgba(240,240,255,0.5)', margin: 0 }}>Enter the 6-digit code shared by your classmate to join their room instantly from any laptop.</p>
                 </div>
                 <form onSubmit={handleJoinByCode} style={{ display: 'flex', gap: '10px' }}>
                   <input
                     type="text"
                     maxLength={8}
-                    placeholder="e.g. 849201"
+                    placeholder="e.g. 619284"
                     value={joinCodeInput}
                     onChange={e => setJoinCodeInput(e.target.value.replace(/[^0-9]/g, ''))}
-                    style={{ background: 'rgba(255,255,255,0.07)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: '12px', padding: '11px 18px', color: '#fff', outline: 'none', fontSize: '1.1rem', letterSpacing: '3px', width: '130px', textAlign: 'center', fontWeight: 700 }}
+                    style={{ background: 'rgba(255,255,255,0.07)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: '12px', padding: '11px 18px', color: '#fff', outline: 'none', fontSize: '1.1rem', letterSpacing: '3px', width: '140px', textAlign: 'center', fontWeight: 700 }}
                   />
                   <button type="submit" className="btn btn-primary" style={{ borderRadius: '12px', padding: '11px 22px', fontWeight: 700 }}>
                     Join Room
@@ -259,8 +321,8 @@ export default function VoiceRoomsPage() {
               {/* Rooms Grid */}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
                 <h2 style={{ fontSize: '1.2rem', fontWeight: 700 }}>📡 Live Study Rooms</h2>
-                <button onClick={handleRefresh} className="btn btn-secondary" style={{ borderRadius: '10px', padding: '8px 16px', fontSize: '0.85rem' }}>
-                  🔄 Refresh
+                <button onClick={fetchGlobalRooms} className="btn btn-secondary" style={{ borderRadius: '10px', padding: '8px 16px', fontSize: '0.85rem' }}>
+                  🔄 Refresh Rooms
                 </button>
               </div>
 
@@ -277,22 +339,26 @@ export default function VoiceRoomsPage() {
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '20px' }}>
                   {activeRooms.map((room) => {
                     const isFull = (room.current_participants || 0) >= (room.max_participants || 6);
-                    const isPreset = room.id?.startsWith('preset-');
+                    const isDemo = Boolean(room.is_demo);
 
                     return (
-                      <div key={room.id} className="glass-card" style={{ padding: '24px', borderRadius: '20px', display: 'flex', flexDirection: 'column', gap: '16px', border: '1px solid rgba(255,255,255,0.08)', position: 'relative' }}>
-                        {isPreset && (
+                      <div key={room.id || room.room_code} className="glass-card" style={{ padding: '24px', borderRadius: '20px', display: 'flex', flexDirection: 'column', gap: '16px', border: isDemo ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(62,207,207,0.3)', position: 'relative' }}>
+                        {isDemo ? (
                           <span style={{ position: 'absolute', top: '14px', right: '14px', fontSize: '0.65rem', background: 'rgba(108,99,255,0.2)', color: '#6c63ff', border: '1px solid rgba(108,99,255,0.35)', borderRadius: '8px', padding: '3px 8px', fontWeight: 600 }}>
                             DEMO
                           </span>
+                        ) : (
+                          <span style={{ position: 'absolute', top: '14px', right: '14px', fontSize: '0.7rem', background: 'rgba(62,207,207,0.2)', color: '#3ecfcf', border: '1px solid rgba(62,207,207,0.4)', borderRadius: '8px', padding: '3px 8px', fontWeight: 700 }}>
+                            🟢 LIVE NOW
+                          </span>
                         )}
                         <div>
-                          <h3 style={{ fontSize: '1.1rem', fontWeight: 700, marginBottom: '10px', paddingRight: isPreset ? '56px' : '0' }}>{room.title}</h3>
+                          <h3 style={{ fontSize: '1.1rem', fontWeight: 700, marginBottom: '10px', paddingRight: '70px' }}>{room.title}</h3>
                           <div style={{ fontSize: '0.82rem', color: 'rgba(240,240,255,0.5)', display: 'flex', flexDirection: 'column', gap: '5px' }}>
                             <span>Host: <strong style={{ color: '#fff' }}>{room.host_name}</strong></span>
-                            <span>Code: <strong style={{ color: '#3ecfcf', letterSpacing: '2px', fontSize: '0.95rem' }}>{room.room_code}</strong></span>
+                            <span>Code: <strong style={{ color: '#3ecfcf', letterSpacing: '2px', fontSize: '1rem' }}>{room.room_code}</strong></span>
                             <span style={{ color: isFull ? '#ff4d4d' : 'rgba(240,240,255,0.5)' }}>
-                              👥 {room.current_participants}/{room.max_participants} {isFull ? '— FULL' : ''}
+                              👥 {room.current_participants || 1}/{room.max_participants || 6} {isFull ? '— FULL' : ''}
                             </span>
                             {room.document_title && (
                               <span style={{ color: '#6c63ff', marginTop: '2px' }}>📄 {room.document_title}</span>
@@ -329,10 +395,10 @@ export default function VoiceRoomsPage() {
                 <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '14px', color: 'rgba(240,240,255,0.8)' }}>🛈 How Voice Rooms Work</h3>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px,1fr))', gap: '16px' }}>
                   {[
-                    { icon: '➕', title: 'Create a room', desc: 'Click "Create Voice Room", give it a title, and get your 6-digit code.' },
-                    { icon: '📤', title: 'Share the code', desc: 'Send the 6-digit code to your classmates (WhatsApp, text, etc.).' },
-                    { icon: '🔑', title: 'Join from any device', desc: 'Your classmates enter the code on any laptop or phone and join instantly.' },
-                    { icon: '🎤', title: 'Study together live', desc: 'Talk, chat, and study together. Works without any server — peer to peer!' },
+                    { icon: '➕', title: 'Create a room', desc: 'Click "Create Voice Room", enter a study topic, and get a 6-digit code.' },
+                    { icon: '📤', title: 'Share the code', desc: 'Send the 6-digit code to classmates on WhatsApp, text, etc.' },
+                    { icon: '🔑', title: 'Join from any device', desc: 'Classmates enter the code on any other laptop, tablet, or phone to join instantly.' },
+                    { icon: '🎤', title: 'Real-time live audio', desc: 'Direct peer-to-peer voice and chat that works anywhere without needing your local computer on.' },
                   ].map(s => (
                     <div key={s.title} style={{ background: 'rgba(255,255,255,0.03)', borderRadius: '12px', padding: '14px 16px' }}>
                       <div style={{ fontSize: '1.4rem', marginBottom: '6px' }}>{s.icon}</div>
@@ -381,7 +447,7 @@ export default function VoiceRoomsPage() {
                   </div>
 
                   <div style={{ background: 'rgba(62,207,207,0.08)', padding: '12px 16px', borderRadius: '12px', border: '1px solid rgba(62,207,207,0.2)', fontSize: '0.82rem', color: '#3ecfcf' }}>
-                    ✅ Your room will be joinable from <strong>any laptop or device</strong> using the 6-digit code. No sign-in needed for classmates to join.
+                    ✅ Your room will be visible and joinable from <strong>any other laptop</strong> instantly via the 6-digit code.
                   </div>
 
                   <div style={{ display: 'flex', gap: '12px', marginTop: '6px' }}>

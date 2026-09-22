@@ -18,6 +18,29 @@ export function StudyProvider({ children }) {
     }
   }, []);
 
+  const ensureDocumentContent = useCallback(async (docId) => {
+    if (!docId) return '';
+    const current = documents.find(d => d.id === docId);
+    if (current?.content && current.content.trim().length > 10) {
+      return current.content;
+    }
+    try {
+      const res = await documentsAPI.get(docId);
+      const fetched = res.data?.data?.document;
+      if (fetched?.content) {
+        setDocuments(prev => {
+          const updated = prev.map(d => d.id === docId ? { ...d, content: fetched.content, num_pages: fetched.num_pages || d.num_pages } : d);
+          localStorage.setItem('study_documents', JSON.stringify(updated));
+          return updated;
+        });
+        return fetched.content;
+      }
+    } catch (e) {
+      console.warn('Could not fetch remote doc content:', e);
+    }
+    return current?.content || '';
+  }, [documents]);
+
   const loadDocuments = useCallback(async () => {
     setLoadingDocs(true);
     // Read local stored documents first for zero lag
@@ -29,20 +52,34 @@ export function StudyProvider({ children }) {
       const payload = res.data?.data;
       const remoteList = payload?.items || (Array.isArray(payload) ? payload : []);
       if (remoteList.length > 0) {
-        // Merge remote and local documents
+        // Merge remote and local documents without losing content
         const mergedMap = new Map();
         localDocs.forEach(d => mergedMap.set(d.id, d));
-        remoteList.forEach(d => mergedMap.set(d.id, d));
+        remoteList.forEach(d => {
+          const existing = mergedMap.get(d.id) || localDocs.find(ld => ld.title === d.title);
+          mergedMap.set(d.id, {
+            ...existing,
+            ...d,
+            content: existing?.content || d.content || '',
+            num_pages: existing?.num_pages || d.num_pages || 1,
+          });
+        });
         const mergedList = Array.from(mergedMap.values());
         setDocuments(mergedList);
         localStorage.setItem('study_documents', JSON.stringify(mergedList));
+
+        // If active document has no content, fetch it
+        const firstDoc = mergedList[0];
+        if (firstDoc && (!firstDoc.content || firstDoc.content.length < 10)) {
+          ensureDocumentContent(firstDoc.id);
+        }
       }
     } catch (err) {
       console.warn('Backend list unavailable, keeping local documents:', err);
     } finally {
       setLoadingDocs(false);
     }
-  }, []);
+  }, [ensureDocumentContent]);
 
   const addDocument = useCallback((doc) => {
     const updated = saveDocumentLocally(doc);
@@ -73,6 +110,7 @@ export function StudyProvider({ children }) {
     loadDocuments,
     loadingDocs,
     deleteDocument,
+    ensureDocumentContent,
   };
 
   return <StudyContext.Provider value={value}>{children}</StudyContext.Provider>;
