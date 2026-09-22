@@ -149,9 +149,9 @@ export default function FlashcardsPage() {
 
     // ── Fire-and-forget API call in the background ──────────────────────────
     addToast(correct ? 'Great job! +2 XP' : 'Keep practicing!', correct ? 'success' : 'info');
-    axios
-      .post(`/api/flashcards/${card.id}/review`, { correct })
-      .catch(err => console.error('Review save failed (non-blocking):', err));
+    flashcardsAPI
+      .review(card.id, correct)
+      .catch(err => console.warn('Review save notice:', err));
   };
 
   const handleRestart = () => {

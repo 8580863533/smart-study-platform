@@ -49,18 +49,23 @@ export default function QAPage() {
     if (!id) return;
     setLoadingHistory(true);
     try {
-      const res = await axios.get(`/api/qa/history/${id}`);
-      if (res.data.success) {
-        // Map history to chat format
+      const localHistory = localStorage.getItem(`qa_history_${id}`);
+      if (localHistory) {
+        setChatHistory(JSON.parse(localHistory));
+      }
+      const res = await qaAPI.history(id);
+      if (res.data?.success && res.data?.data) {
         const history = res.data.data.map(q => [
           { sender: 'user', text: q.question, timestamp: q.created_at },
           { sender: 'ai', text: q.answer, confidence: q.confidence, source: q.source_passage, timestamp: q.created_at }
         ]).flat();
-        setChatHistory(history);
+        if (history.length > 0) {
+          setChatHistory(history);
+          localStorage.setItem(`qa_history_${id}`, JSON.stringify(history));
+        }
       }
     } catch (err) {
-      console.error(err);
-      addToast("Failed to load Q&A history.", "error");
+      console.warn("Q&A history sync notice:", err);
     } finally {
       setLoadingHistory(false);
     }
@@ -79,7 +84,7 @@ export default function QAPage() {
 
   const handleAsk = async (e) => {
     e.preventDefault();
-    if (!question.strip && !question.trim()) return;
+    if (!question || !question.trim()) return;
     if (!selectedDocId) {
       addToast("Please select a document first.", "error");
       return;
@@ -88,21 +93,31 @@ export default function QAPage() {
     const currentQuestion = question.trim();
     setQuestion('');
     
-    // Optimistic user message update
-    setChatHistory(prev => [...prev, { sender: 'user', text: currentQuestion, timestamp: new Date().toISOString() }]);
+    // User message
+    const userMsg = { sender: 'user', text: currentQuestion, timestamp: new Date().toISOString() };
+    setChatHistory(prev => {
+      const updated = [...prev, userMsg];
+      localStorage.setItem(`qa_history_${selectedDocId}`, JSON.stringify(updated));
+      return updated;
+    });
     setLoading(true);
 
     try {
       const res = await qaAPI.ask(selectedDocId, currentQuestion);
       if (res.data?.success && res.data?.data) {
         const { answer, confidence, source_passage, xp_earned } = res.data.data;
-        setChatHistory(prev => [...prev, {
+        const aiMsg = {
           sender: 'ai',
           text: answer,
           confidence: confidence,
           source: source_passage,
           timestamp: new Date().toISOString()
-        }]);
+        };
+        setChatHistory(prev => {
+          const updated = [...prev, aiMsg];
+          localStorage.setItem(`qa_history_${selectedDocId}`, JSON.stringify(updated));
+          return updated;
+        });
         addToast(`Answered from notes! +${xp_earned || 5} XP`, "success");
         setLoading(false);
         return;
@@ -112,15 +127,21 @@ export default function QAPage() {
     }
 
     // Fallback: Answer instantly using document content across all pages
-    const doc = documents.find(d => d.id === selectedDocId);
-    const fallbackAnswer = answerQuestionFromText(currentQuestion, doc?.content || "");
-    setChatHistory(prev => [...prev, {
+    const doc = documents.find(d => d.id === selectedDocId) || activeDocument;
+    const docContent = doc?.content || "";
+    const fallbackAnswer = answerQuestionFromText(currentQuestion, docContent);
+    const aiMsg = {
       sender: 'ai',
       text: fallbackAnswer.answer,
       confidence: fallbackAnswer.confidence,
       source: fallbackAnswer.source_passage,
       timestamp: new Date().toISOString()
-    }]);
+    };
+    setChatHistory(prev => {
+      const updated = [...prev, aiMsg];
+      localStorage.setItem(`qa_history_${selectedDocId}`, JSON.stringify(updated));
+      return updated;
+    });
     addToast("Answered from notes content! +5 XP", "success");
     setLoading(false);
   };
