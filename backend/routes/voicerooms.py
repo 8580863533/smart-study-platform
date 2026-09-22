@@ -35,12 +35,11 @@ SIGNAL_QUEUES = {}
 
 
 def _generate_room_code() -> str:
-    """Generate a unique 6-character room code (e.g. STUDY-8A2 -> 8A2B9X)."""
-    chars = string.ascii_uppercase + string.digits
+    """Generate a unique 6-digit room code (e.g. 849201)."""
     while True:
-        code = "".join(random.choices(chars, k=6))
+        code = "".join(random.choices(string.digits, k=6))
         if not VoiceRoom.query.filter_by(room_code=code, is_active=True).first():
-            return f"STUDY-{code[:3]}"
+            return code
 
 
 def _ok(data=None, message: str = "Success", status: int = 200):

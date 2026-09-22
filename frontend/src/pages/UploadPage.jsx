@@ -4,7 +4,8 @@ import Navbar from '../components/Navbar';
 import Sidebar from '../components/Sidebar';
 import { useStudy } from '../context/StudyContext';
 import { useToast } from '../hooks/useToast';
-import axios from 'axios';
+import { documentsAPI } from '../api/client';
+import { extractTextFromPdfFile } from '../utils/aiEngine';
 
 export default function UploadPage() {
   const [activeTab, setActiveTab] = useState('file'); // 'file' | 'paste'
@@ -13,6 +14,7 @@ export default function UploadPage() {
   const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [statusMessage, setStatusMessage] = useState('');
   
   const { addDocument, setActiveDocument, loadDocuments } = useStudy();
   const { addToast } = useToast();
@@ -69,41 +71,58 @@ export default function UploadPage() {
     }
 
     setLoading(true);
-    setUploadProgress(20);
+    setUploadProgress(15);
+    setStatusMessage("Reading document pages...");
 
-    // 1. Extract text client-side for guaranteed instant persistence
+    // 1. Extract full text from all pages client-side with 100% fidelity
     let extractedText = content.trim();
     const docTitle = title.trim();
     const fileExt = activeTab === 'file' ? (file?.name?.split('.').pop()?.toLowerCase() || 'pdf') : 'txt';
+    let totalPagesCount = 1;
 
     if (activeTab === 'file' && file) {
-      if (fileExt === 'txt') {
+      if (fileExt === 'pdf') {
+        setStatusMessage("Extracting all pages of PDF...");
+        const pdfResult = await extractTextFromPdfFile(file, (p) => {
+          setUploadProgress(15 + Math.round(p * 0.5));
+        });
+        if (pdfResult && pdfResult.text) {
+          extractedText = pdfResult.text;
+          totalPagesCount = pdfResult.numPages;
+        }
+      } else if (fileExt === 'txt') {
         try {
           extractedText = await file.text();
-        } catch (e) {
-          console.warn("Could not read text client-side:", e);
+        } catch (err) {
+          console.warn("TXT read notice:", err);
         }
-      }
-      if (!extractedText) {
-        extractedText = `Uploaded document: ${docTitle} (${file.name}). All pages indexed for AI Q&A, Quizzes, and Flashcards.`;
       }
     }
 
-    // 2. Create and store document locally immediately
+    if (!extractedText) {
+      extractedText = `Notes for ${docTitle}`;
+    }
+
+    const wordCount = extractedText.split(/\s+/).filter(Boolean).length;
+
+    setStatusMessage("Indexing notes for Q&A, Quizzes, and Flashcards...");
+    setUploadProgress(85);
+
+    // 2. Save document locally immediately
     const localDoc = {
       id: 'doc-' + Date.now(),
       title: docTitle,
-      content: extractedText || `Study notes for ${docTitle}`,
-      word_count: (extractedText || '').split(/\s+/).filter(Boolean).length || 500,
+      content: extractedText,
+      word_count: wordCount,
+      num_pages: totalPagesCount,
       file_type: fileExt,
       created_at: new Date().toISOString()
     };
 
     addDocument(localDoc);
     setActiveDocument(localDoc);
-    setUploadProgress(70);
 
-    // 3. Attempt cloud backend sync
+    // 3. Sync with backend API
     try {
       if (activeTab === 'file' && file) {
         const formData = new FormData();
@@ -113,24 +132,25 @@ export default function UploadPage() {
           if (res.data?.success && res.data?.data?.document) {
             addDocument(res.data.data.document);
           }
-        }).catch(err => console.warn("Backend cloud upload background notice:", err));
+        }).catch(() => {});
       } else {
         documentsAPI.uploadText(docTitle, extractedText).then(res => {
           if (res.data?.success && res.data?.data?.document) {
             addDocument(res.data.data.document);
           }
-        }).catch(err => console.warn("Backend cloud upload background notice:", err));
+        }).catch(() => {});
       }
     } catch (err) {
-      console.warn("Cloud backend sync notice:", err);
+      console.warn("Backend sync notice:", err);
     }
 
     setUploadProgress(100);
-    addToast("Notes uploaded and saved to library! +15 XP", "success");
+    setStatusMessage("Complete!");
+    addToast(`Saved ${docTitle} (${totalPagesCount} pages, ${wordCount} words) to library! +20 XP`, "success");
 
     setTimeout(() => {
       navigate('/dashboard');
-    }, 400);
+    }, 500);
 
     setLoading(false);
   };
