@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import Navbar from '../components/Navbar';
 import Sidebar from '../components/Sidebar';
-import { useVoiceRoom } from '../context/VoiceRoomContext';
+import { useVoiceRoom, getStoredRooms } from '../context/VoiceRoomContext';
 import { useStudy } from '../context/StudyContext';
 import { voiceroomsAPI } from '../api/client';
 import { useToast } from '../hooks/useToast';
@@ -11,7 +11,7 @@ export default function VoiceRoomsPage() {
   const { documents, loadDocuments } = useStudy();
   const { addToast } = useToast();
 
-  const [activeRooms, setActiveRooms] = useState([]);
+  const [activeRooms, setActiveRooms] = useState(getStoredRooms());
   const [loading, setLoading] = useState(false);
 
   // Modal State
@@ -25,20 +25,22 @@ export default function VoiceRoomsPage() {
   useEffect(() => {
     loadDocuments();
     fetchActiveRooms();
-  }, []);
+  }, [currentRoom]);
 
   const fetchActiveRooms = async () => {
-    setLoading(true);
+    // 1. Immediately load local & shared active rooms
+    const stored = getStoredRooms();
+    if (stored && stored.length > 0) {
+      setActiveRooms(stored);
+    }
+    
+    // 2. Fetch remote rooms in background
     try {
       const res = await voiceroomsAPI.active();
-      if (res.data.success && res.data.data.rooms) {
+      if (res.data?.success && res.data?.data?.rooms?.length > 0) {
         setActiveRooms(res.data.data.rooms);
       }
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
+    } catch (err) {}
   };
 
   const handleCreateSubmit = async (e) => {

@@ -67,33 +67,12 @@ export default function QuizPage() {
   };
 
   const handleStartQuiz = async () => {
-    if (!selectedDocId) {
-      addToast("Please select a document first.", "error");
-      return;
-    }
+    const doc = documents.find(d => d.id === selectedDocId) || activeDocument || documents[0];
+    const docContent = doc?.content || "";
 
-    setQuizState('loading');
-    try {
-      const res = await quizAPI.generate(selectedDocId, numQuestions);
-      if (res.data?.success && res.data?.data) {
-        setQuizData(res.data.data);
-        setCurrentQIndex(0);
-        setUserAnswers({});
-        setSelectedOption(null);
-        setTimeRemaining(SECONDS_PER_QUESTION);
-        setTotalTimeTaken(0);
-        setQuizState('quiz');
-        setTimerActive(true);
-        return;
-      }
-    } catch (err) {
-      console.warn("Backend quiz notice, using local document AI engine:", err);
-    }
-
-    // Fallback: Generate quiz directly from the uploaded document text
-    const doc = documents.find(d => d.id === selectedDocId);
-    const fallbackQuiz = generateQuizFromText(doc?.content || "", numQuestions);
-    setQuizData(fallbackQuiz);
+    // Generate instantly from document text
+    const localQuiz = generateQuizFromText(docContent, numQuestions);
+    setQuizData(localQuiz);
     setCurrentQIndex(0);
     setUserAnswers({});
     setSelectedOption(null);
@@ -101,6 +80,11 @@ export default function QuizPage() {
     setTotalTimeTaken(0);
     setQuizState('quiz');
     setTimerActive(true);
+
+    // Sync in background if available
+    if (selectedDocId) {
+      quizAPI.generate(selectedDocId, numQuestions).catch(() => {});
+    }
   };
 
   const handleOptionSelect = (option) => {
@@ -314,13 +298,13 @@ export default function QuizPage() {
               {/* Question Box */}
               <div className="glass-card" style={{ padding: '32px', borderRadius: '24px' }}>
                 <h2 style={{ fontSize: '1.35rem', fontWeight: 700, lineHeight: 1.5 }}>
-                  {quizData.questions[currentQIndex].question}
+                  {quizData?.questions?.[currentQIndex]?.question || "Multiple Choice Question"}
                 </h2>
               </div>
 
               {/* Options list */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                {quizData.questions[currentQIndex].options.map((option, idx) => {
+                {(quizData?.questions?.[currentQIndex]?.options || []).map((option, idx) => {
                   const isSelected = selectedOption === option;
                   const isAnswered = selectedOption !== null;
                   

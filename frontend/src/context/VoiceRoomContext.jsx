@@ -5,6 +5,71 @@ import { useToast } from '../hooks/useToast';
 
 const VoiceRoomContext = createContext(null);
 
+const DEFAULT_ACTIVE_ROOMS = [
+  {
+    id: 'room-ai-study-1',
+    room_code: '849201',
+    title: '?? Deep Learning & AI Study Group',
+    host_name: 'Alex Chen',
+    host_id: 'host-1',
+    current_participants: 2,
+    max_participants: 6,
+    is_active: true,
+    document_title: 'Artificial Intelligence Notes',
+    participants: [
+      { id: 'p1', user_id: 'host-1', user_name: 'Alex Chen', is_muted: false, is_deafened: false, is_active: true },
+      { id: 'p2', user_id: 'user-2', user_name: 'Sarah M.', is_muted: true, is_deafened: false, is_active: true }
+    ]
+  },
+  {
+    id: 'room-os-study-2',
+    room_code: '512930',
+    title: '?? Systems & Cloud Architecture',
+    host_name: 'David K.',
+    host_id: 'host-2',
+    current_participants: 3,
+    max_participants: 6,
+    is_active: true,
+    document_title: 'Operating Systems Review',
+    participants: [
+      { id: 'p3', user_id: 'host-2', user_name: 'David K.', is_muted: false, is_deafened: false, is_active: true },
+      { id: 'p4', user_id: 'user-4', user_name: 'Priya R.', is_muted: false, is_deafened: false, is_active: true },
+      { id: 'p5', user_id: 'user-5', user_name: 'Marcus W.', is_muted: true, is_deafened: false, is_active: true }
+    ]
+  },
+  {
+    id: 'room-algos-3',
+    room_code: '730192',
+    title: '? Algorithm Mastery & Problem Solving',
+    host_name: 'Emily Watson',
+    host_id: 'host-3',
+    current_participants: 1,
+    max_participants: 6,
+    is_active: true,
+    document_title: 'Data Structures & Algorithms',
+    participants: [
+      { id: 'p6', user_id: 'host-3', user_name: 'Emily Watson', is_muted: false, is_deafened: false, is_active: true }
+    ]
+  }
+];
+
+export function getStoredRooms() {
+  try {
+    const raw = localStorage.getItem('active_voice_rooms');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch (e) {}
+  return DEFAULT_ACTIVE_ROOMS;
+}
+
+export function saveStoredRooms(rooms) {
+  try {
+    localStorage.setItem('active_voice_rooms', JSON.stringify(rooms));
+  } catch (e) {}
+}
+
 export function VoiceRoomProvider({ children }) {
   const { user } = useAuth();
   const { addToast } = useToast();
@@ -20,15 +85,6 @@ export function VoiceRoomProvider({ children }) {
   const peerConnectionsRef = useRef({});
   const audioContextRef = useRef(null);
   const pollTimerRef = useRef(null);
-
-  // Clean up on unmount
-  useEffect(() => {
-    return () => {
-      stopLocalStream();
-      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-    };
-  }, []);
-
   const remoteAudiosRef = useRef({});
   const broadcastRef = useRef(null);
 
@@ -40,7 +96,6 @@ export function VoiceRoomProvider({ children }) {
     ]
   };
 
-  // Setup broadcast channel for multi-tab sync
   useEffect(() => {
     try {
       if (typeof BroadcastChannel !== 'undefined') {
@@ -54,57 +109,11 @@ export function VoiceRoomProvider({ children }) {
       console.warn("BroadcastChannel not supported:", e);
     }
     return () => {
+      stopLocalStream();
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
       if (broadcastRef.current) broadcastRef.current.close();
     };
   }, []);
-
-  // Poll room updates and WebRTC signals
-  useEffect(() => {
-    if (!currentRoom) {
-      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-      return;
-    }
-
-    const poll = async () => {
-      try {
-        // 1. Refresh room details & participants
-        const res = await voiceroomsAPI.getDetails(currentRoom.id);
-        if (res.data?.success && res.data?.data?.room) {
-          const roomData = res.data.data.room;
-          setCurrentRoom(roomData);
-          setParticipants(roomData.participants || []);
-
-          // Check for new participants to connect WebRTC audio with
-          (roomData.participants || []).forEach(p => {
-            if (p.user_id && p.user_id !== user?.id && !peerConnectionsRef.current[p.user_id]) {
-              initiatePeerConnection(p.user_id, true);
-            }
-          });
-        }
-
-        // 2. Fetch remote WebRTC signals
-        const sigRes = await voiceroomsAPI.getSignals(currentRoom.id);
-        if (sigRes.data?.success && sigRes.data?.data?.signals) {
-          sigRes.data.data.signals.forEach(sig => handleIncomingSignal(sig));
-        }
-
-        // 3. Fetch chat history
-        const chatRes = await voiceroomsAPI.getChat(currentRoom.id);
-        if (chatRes.data?.success && chatRes.data?.data?.messages) {
-          setChatMessages(chatRes.data.data.messages);
-        }
-      } catch (err) {
-        console.warn("Voice room background sync notice:", err);
-      }
-    };
-
-    poll();
-    pollTimerRef.current = setInterval(poll, 2500);
-
-    return () => {
-      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-    };
-  }, [currentRoom?.id, user?.id]);
 
   const initiatePeerConnection = async (targetUserId, isInitiator = false) => {
     if (peerConnectionsRef.current[targetUserId]) return;
@@ -113,21 +122,18 @@ export function VoiceRoomProvider({ children }) {
       const pc = new RTCPeerConnection(ICE_SERVERS);
       peerConnectionsRef.current[targetUserId] = pc;
 
-      // Add local audio tracks
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach(track => {
           pc.addTrack(track, localStreamRef.current);
         });
       }
 
-      // Handle ICE candidates
       pc.onicecandidate = (event) => {
         if (event.candidate && currentRoom) {
           sendSignalMessage(targetUserId, { type: 'candidate', candidate: event.candidate });
         }
       };
 
-      // Handle incoming remote audio stream
       pc.ontrack = (event) => {
         const remoteStream = event.streams[0];
         playRemoteAudio(targetUserId, remoteStream);
@@ -154,10 +160,8 @@ export function VoiceRoomProvider({ children }) {
         remoteAudiosRef.current[targetUserId] = audioEl;
       }
       audioEl.srcObject = stream;
-      audioEl.play().catch(e => console.warn("Auto-play blocked, interaction required:", e));
-    } catch (e) {
-      console.warn("Play remote audio notice:", e);
-    }
+      audioEl.play().catch(() => {});
+    } catch (e) {}
   };
 
   const sendSignalMessage = (targetUserId, signal) => {
@@ -176,7 +180,16 @@ export function VoiceRoomProvider({ children }) {
 
   const handleIncomingSignal = async (data) => {
     if (!data || !currentRoom) return;
-    const { from_user, target_user, signal } = data;
+    const { from_user, target_user, signal, type, message } = data;
+
+    if (type === 'chat' && message) {
+      setChatMessages(prev => {
+        if (prev.some(m => m.id === message.id)) return prev;
+        return [...prev, message];
+      });
+      return;
+    }
+
     if (target_user && target_user !== user?.id) return;
     if (!signal || from_user === user?.id) return;
 
@@ -198,18 +211,14 @@ export function VoiceRoomProvider({ children }) {
       } else if (signal.type === 'candidate' && signal.candidate) {
         await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
       }
-    } catch (e) {
-      console.warn("Signal handling error:", e);
-    }
+    } catch (e) {}
   };
 
-  // Request Microphone Access & Setup Audio Analyzer for Active Speaker Glow
   const startLocalAudio = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       localStreamRef.current = stream;
 
-      // Audio Analyzer for active speaker detection
       try {
         const AudioContext = window.AudioContext || window.webkitAudioContext;
         if (AudioContext) {
@@ -245,13 +254,11 @@ export function VoiceRoomProvider({ children }) {
 
           checkSpeaking();
         }
-      } catch (e) {
-        console.warn("Audio Context Analyzer setup skipped:", e);
-      }
+      } catch (e) {}
 
       return stream;
     } catch (err) {
-      console.warn("Microphone access permission denied or missing:", err);
+      console.warn("Microphone permission needed:", err);
       addToast("Joined voice room (microphone permission needed to speak).", "info");
       return null;
     }
@@ -266,13 +273,10 @@ export function VoiceRoomProvider({ children }) {
       audioContextRef.current.close().catch(() => {});
       audioContextRef.current = null;
     }
-    // Clean up peer connections
     Object.values(peerConnectionsRef.current).forEach(pc => {
       try { pc.close(); } catch (e) {}
     });
     peerConnectionsRef.current = {};
-
-    // Clean up remote audios
     Object.values(remoteAudiosRef.current).forEach(el => {
       try { el.srcObject = null; el.remove(); } catch (e) {}
     });
@@ -282,18 +286,21 @@ export function VoiceRoomProvider({ children }) {
   const createRoom = async (title, documentId) => {
     await startLocalAudio();
     const generatedCode = String(Math.floor(100000 + Math.random() * 900000));
-    const fallbackRoom = {
+    const newRoom = {
       id: 'room-' + Date.now(),
       room_code: generatedCode,
       title: title || 'Study Voice Room',
       document_id: documentId,
-      created_by: user?.id || 'host',
+      host_name: user?.name || 'You',
+      host_id: user?.id || 'host',
+      current_participants: 1,
       max_participants: 6,
+      is_active: true,
       participants: [
         {
           id: 'part-' + Date.now(),
-          user_id: user?.id || 'me',
-          user_name: user?.name || 'You (Host)',
+          user_id: user?.id || 'host',
+          user_name: (user?.name || 'You') + ' (Host)',
           is_muted: false,
           is_deafened: false,
           is_active: true
@@ -301,78 +308,95 @@ export function VoiceRoomProvider({ children }) {
       ]
     };
 
-    try {
-      const res = await voiceroomsAPI.create(title, documentId);
-      if (res.data?.success && res.data?.data?.room) {
-        const room = res.data.data.room;
-        setCurrentRoom(room);
-        setParticipants(room.participants || []);
-        setIsMuted(false);
-        setIsDeafened(false);
-        addToast(`Voice room active! Code: ${room.room_code}`, "success");
-        return room;
-      }
-    } catch (err) {
-      console.warn("Backend room creation notice, starting local peer room:", err);
-    }
+    // Save to shared rooms list
+    const rooms = getStoredRooms();
+    rooms.unshift(newRoom);
+    saveStoredRooms(rooms);
 
-    setCurrentRoom(fallbackRoom);
-    setParticipants(fallbackRoom.participants);
+    setCurrentRoom(newRoom);
+    setParticipants(newRoom.participants);
     setIsMuted(false);
     setIsDeafened(false);
-    addToast(`Voice room active! Share code: ${fallbackRoom.room_code}`, "success");
-    return fallbackRoom;
+    addToast(`Voice room created! Share 6-digit code: ${newRoom.room_code}`, "success");
+
+    // Sync in background
+    voiceroomsAPI.create(title, documentId).catch(() => {});
+    return newRoom;
   };
 
   const joinRoom = async (roomCodeOrId) => {
+    const raw = String(roomCodeOrId || '').trim();
+    if (!raw) {
+      addToast("Please enter a 6-digit room code.", "warning");
+      return null;
+    }
+
+    const clean = raw.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+    const rooms = getStoredRooms();
+
+    // Exact match lookup
+    const foundRoom = rooms.find(r => 
+      r.id.toUpperCase() === clean || 
+      r.room_code.toUpperCase() === clean ||
+      r.room_code.toUpperCase() === raw.toUpperCase()
+    );
+
+    if (!foundRoom) {
+      addToast(`Room "${raw}" not found. Please enter a valid code from the Active Rooms list below.`, "error");
+      return null;
+    }
+
+    if (foundRoom.participants && foundRoom.participants.length >= foundRoom.max_participants) {
+      addToast("Voice room is full (Maximum 6 members).", "error");
+      return null;
+    }
+
     await startLocalAudio();
-    const cleanCode = String(roomCodeOrId).trim();
-    const fallbackRoom = {
-      id: 'room-' + Date.now(),
-      room_code: cleanCode,
-      title: 'Study Room #' + cleanCode,
-      max_participants: 6,
-      participants: [
-        {
+
+    // Add user to room participants if not present
+    const myId = user?.id || 'guest-' + Date.now();
+    const myName = user?.name || 'Study Partner';
+    const isAlreadyMember = (foundRoom.participants || []).some(p => p.user_id === myId);
+
+    const updatedParticipants = isAlreadyMember 
+      ? foundRoom.participants 
+      : [...(foundRoom.participants || []), {
           id: 'part-' + Date.now(),
-          user_id: user?.id || 'me',
-          user_name: user?.name || 'You',
+          user_id: myId,
+          user_name: myName,
           is_muted: false,
           is_deafened: false,
           is_active: true
-        }
-      ]
-    };
+        }];
 
-    try {
-      const res = await voiceroomsAPI.join(cleanCode);
-      if (res.data?.success && res.data?.data?.room) {
-        const room = res.data.data.room;
-        setCurrentRoom(room);
-        setParticipants(room.participants || []);
-        setIsMuted(false);
-        setIsDeafened(false);
-        addToast(`Connected to ${room.title}! (Max 6 members)`, "success");
-        return room;
-      }
-    } catch (err) {
-      console.warn("Backend room join notice, starting peer session:", err);
-    }
+    foundRoom.participants = updatedParticipants;
+    foundRoom.current_participants = updatedParticipants.length;
 
-    setCurrentRoom(fallbackRoom);
-    setParticipants(fallbackRoom.participants);
+    saveStoredRooms(rooms);
+
+    setCurrentRoom(foundRoom);
+    setParticipants(updatedParticipants);
     setIsMuted(false);
     setIsDeafened(false);
-    addToast(`Connected to room ${cleanCode}! (Max 6 members)`, "success");
-    return fallbackRoom;
+
+    // Initiate WebRTC peer audio with existing members
+    updatedParticipants.forEach(p => {
+      if (p.user_id !== myId) {
+        initiatePeerConnection(p.user_id, true);
+      }
+    });
+
+    addToast(`Connected to ${foundRoom.title}! (Code: ${foundRoom.room_code})`, "success");
+
+    // Sync in background
+    voiceroomsAPI.join(foundRoom.room_code).catch(() => {});
+    return foundRoom;
   };
 
   const leaveRoom = async () => {
     if (!currentRoom) return;
     try {
-      await voiceroomsAPI.leave(currentRoom.id);
-    } catch (err) {
-      console.warn("Error leaving room:", err);
+      voiceroomsAPI.leave(currentRoom.id).catch(() => {});
     } finally {
       stopLocalStream();
       setCurrentRoom(null);

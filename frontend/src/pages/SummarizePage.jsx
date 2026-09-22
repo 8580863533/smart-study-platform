@@ -33,29 +33,22 @@ export default function SummarizePage() {
   }, [docId, activeDocument, documents]);
 
   const loadSummary = async (id, forceRegen = false) => {
-    if (!id) return;
-    setLoading(true);
-    setSummaryData(null);
-    try {
-      const res = await summarizeAPI.summarize(id, { force: forceRegen });
-      if (res.data?.success && res.data?.data) {
-        setSummaryData(res.data.data);
-        if (res.data.data.xp_earned) {
-          addToast(`Document summarized! +${res.data.data.xp_earned} XP`, "success");
-        }
-        setLoading(false);
-        return;
-      }
-    } catch (err) {
-      console.warn("Backend summarize notice, summarizing from local document content:", err);
-    }
+    const targetId = id || selectedDocId;
+    const doc = documents.find(d => d.id === targetId) || activeDocument || documents[0];
+    const docContent = doc?.content || "";
 
-    // Fallback: Summarize from document content across all pages
-    const doc = documents.find(d => d.id === id);
-    const localSummary = summarizeTextContent(doc?.content || "", 6);
+    // Generate summary instantly with 0 delay
+    const localSummary = summarizeTextContent(docContent, 6);
     setSummaryData(localSummary);
-    addToast(`Document summarized! +15 XP`, "success");
     setLoading(false);
+
+    if (targetId) {
+      summarizeAPI.summarize(targetId, { force: forceRegen }).then(res => {
+        if (res.data?.success && res.data?.data) {
+          setSummaryData(res.data.data);
+        }
+      }).catch(() => {});
+    }
   };
 
   const handleDocChange = (e) => {

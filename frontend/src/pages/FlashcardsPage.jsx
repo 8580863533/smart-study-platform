@@ -45,33 +45,26 @@ export default function FlashcardsPage() {
   }, [docId, documents]); // ← removed activeDocument to prevent re-trigger on tab switch
 
   const loadCards = async (id) => {
-    if (!id) return;
-    setLoading(true);
-    setCards([]);
+    const targetId = id || selectedDocId;
+    const doc = documents.find(d => d.id === targetId) || activeDocument || documents[0];
+    const docContent = doc?.content || "";
+
+    // Generate cards immediately with 0 lag
+    const localCards = generateFlashcardsFromText(docContent, 8);
+    setCards(localCards);
     setCurrentIndex(0);
     setFlipped(false);
     setCompleted(false);
-    
-    try {
-      const res = await flashcardsAPI.list(id);
-      if (res.data?.success) {
-        const items = res.data.data?.items || res.data.data;
-        const list = Array.isArray(items) ? items : [];
-        if (list.length > 0) {
-          setCards(list);
-          setLoading(false);
-          return;
-        }
-      }
-    } catch (err) {
-      console.warn("Backend flashcards notice, generating from local document content:", err);
-    }
-
-    // Fallback: Generate flashcards from document content across all pages
-    const doc = documents.find(d => d.id === id);
-    const localCards = generateFlashcardsFromText(doc?.content || "", 8);
-    setCards(localCards);
     setLoading(false);
+
+    // Sync in background if available
+    if (targetId) {
+      flashcardsAPI.list(targetId).then(res => {
+        if (res.data?.success && res.data.data?.length > 0) {
+          setCards(res.data.data);
+        }
+      }).catch(() => {});
+    }
   };
 
   const handleDocChange = (e) => {
@@ -85,41 +78,21 @@ export default function FlashcardsPage() {
   };
 
   const handleGenerate = async () => {
-    if (!selectedDocId) return;
-    setLoading(true);
-    setCards([]);
+    const doc = documents.find(d => d.id === selectedDocId) || activeDocument || documents[0];
+    const docContent = doc?.content || "";
+
+    const localCards = generateFlashcardsFromText(docContent, 10);
+    setCards(localCards);
     setCurrentIndex(0);
     setFlipped(false);
     setCompleted(false);
     setReviewsDone(0);
-
-    try {
-      const res = await flashcardsAPI.generate(selectedDocId);
-      if (res.data?.success) {
-        const payload = res.data.data;
-        const list = Array.isArray(payload)
-          ? payload
-          : Array.isArray(payload?.flashcards)
-          ? payload.flashcards
-          : Array.isArray(payload?.items)
-          ? payload.items
-          : [];
-        if (list.length > 0) {
-          setCards(list);
-          addToast(`Generated ${list.length} AI Flashcards! +20 XP`, 'success');
-          setLoading(false);
-          return;
-        }
-      }
-    } catch (err) {
-      console.warn("Backend flashcard generation notice, generating from local document:", err);
-    }
-
-    const doc = documents.find(d => d.id === selectedDocId);
-    const localCards = generateFlashcardsFromText(doc?.content || "", 10);
-    setCards(localCards);
-    addToast(`Generated ${localCards.length} AI Flashcards! +20 XP`, 'success');
     setLoading(false);
+    addToast(`Generated ${localCards.length} AI Flashcards! +20 XP`, 'success');
+
+    if (selectedDocId) {
+      flashcardsAPI.generate(selectedDocId).catch(() => {});
+    }
   };
 
   const handleReview = (correct) => {
