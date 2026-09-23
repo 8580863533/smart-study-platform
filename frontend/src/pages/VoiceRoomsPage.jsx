@@ -7,6 +7,137 @@ import { useToast } from '../hooks/useToast';
 
 const GLOBAL_ROOMS_TOPIC = 'study_global_voice_rooms_v2';
 
+// ── Screen Share Theater Component ────────────────────────────────────────────
+function ScreenShareTheater({ stream, isLocal, sharerName, onStop }) {
+  const videoRef = useRef(null);
+  const containerRef = useRef(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  useEffect(() => {
+    if (videoRef.current && stream) {
+      videoRef.current.srcObject = stream;
+      videoRef.current.play().catch(() => {});
+    }
+  }, [stream]);
+
+  const toggleFullscreen = () => {
+    if (!containerRef.current) return;
+    if (!document.fullscreenElement) {
+      containerRef.current.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => {});
+    } else {
+      document.exitFullscreen().then(() => setIsFullscreen(false)).catch(() => {});
+    }
+  };
+
+  useEffect(() => {
+    const handleFsChange = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+    };
+    document.addEventListener('fullscreenchange', handleFsChange);
+    return () => document.removeEventListener('fullscreenchange', handleFsChange);
+  }, []);
+
+  return (
+    <div
+      ref={containerRef}
+      style={{
+        background: '#0a0b1a',
+        borderRadius: '20px',
+        overflow: 'hidden',
+        border: '1.5px solid rgba(62, 207, 207, 0.4)',
+        boxShadow: '0 0 35px rgba(62, 207, 207, 0.15)',
+        marginBottom: '24px',
+        position: 'relative',
+        display: 'flex',
+        flexDirection: 'column'
+      }}
+    >
+      {/* Top Overlay Bar */}
+      <div style={{
+        padding: '12px 20px',
+        background: 'rgba(10, 11, 26, 0.85)',
+        backdropFilter: 'blur(8px)',
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
+        zIndex: 10
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <span style={{
+            fontSize: '0.75rem',
+            background: 'rgba(62, 207, 207, 0.2)',
+            color: '#3ecfcf',
+            border: '1px solid rgba(62, 207, 207, 0.4)',
+            padding: '3px 10px',
+            borderRadius: '12px',
+            fontWeight: 800,
+            letterSpacing: '0.5px'
+          }}>
+            🔴 LIVE STREAM
+          </span>
+          <span style={{ color: '#fff', fontSize: '0.92rem', fontWeight: 700 }}>
+            {isLocal ? '🖥️ You are sharing your screen' : `🖥️ ${sharerName}'s Screen`}
+          </span>
+        </div>
+
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          {isLocal && (
+            <button
+              onClick={onStop}
+              style={{
+                background: 'rgba(255, 77, 77, 0.25)',
+                color: '#ff4d4d',
+                border: '1px solid rgba(255, 77, 77, 0.4)',
+                padding: '6px 14px',
+                borderRadius: '10px',
+                cursor: 'pointer',
+                fontWeight: 700,
+                fontSize: '0.8rem'
+              }}
+            >
+              🛑 Stop Sharing
+            </button>
+          )}
+
+          <button
+            onClick={toggleFullscreen}
+            style={{
+              background: 'rgba(255, 255, 255, 0.08)',
+              color: '#fff',
+              border: '1px solid rgba(255, 255, 255, 0.15)',
+              padding: '6px 14px',
+              borderRadius: '10px',
+              cursor: 'pointer',
+              fontWeight: 600,
+              fontSize: '0.8rem'
+            }}
+          >
+            {isFullscreen ? '✕ Exit Fullscreen' : '⛶ Fullscreen'}
+          </button>
+        </div>
+      </div>
+
+      {/* Video Element (Local muted to prevent echo; remote unmuted) */}
+      <div style={{ position: 'relative', width: '100%', minHeight: '380px', maxHeight: '560px', background: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted={isLocal}
+          style={{
+            width: '100%',
+            height: '100%',
+            maxHeight: '560px',
+            objectFit: 'contain',
+            display: 'block'
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
 export default function VoiceRoomsPage() {
   const {
     currentRoom,
@@ -21,6 +152,12 @@ export default function VoiceRoomsPage() {
     denyJoinRequest,
     autoAdmit,
     setAutoAdmit,
+    currentScreenSharer,
+    isScreenSharing,
+    localScreenStream,
+    remoteScreenStream,
+    startScreenShare,
+    stopScreenShare,
     createRoom,
     joinRoom,
     leaveRoom,
@@ -151,6 +288,10 @@ export default function VoiceRoomsPage() {
   const MAX_SLOTS = 6;
   const slots = Array.from({ length: MAX_SLOTS }, (_, i) => participants[i] || null);
 
+  // Check if someone is sharing screen
+  const isSomeoneSharing = Boolean(currentScreenSharer);
+  const activeScreenStream = isScreenSharing ? localScreenStream : remoteScreenStream;
+
   return (
     <div style={{ minHeight: '100vh', background: 'radial-gradient(ellipse at top, #0f1026 0%, #060714 100%)', display: 'flex', flexDirection: 'column' }}>
       <Navbar />
@@ -243,7 +384,7 @@ export default function VoiceRoomsPage() {
                 </div>
               )}
 
-              {/* Discord-Style Channel Header */}
+              {/* Discord-Style Channel Header Bar */}
               <div className="glass-card" style={{
                 padding: '24px 30px',
                 borderRadius: '20px',
@@ -271,6 +412,19 @@ export default function VoiceRoomsPage() {
                     }}>
                       OPUS STEREO
                     </span>
+                    {isSomeoneSharing && (
+                      <span style={{
+                        fontSize: '0.75rem',
+                        background: 'rgba(108, 99, 255, 0.25)',
+                        color: '#a78bfa',
+                        border: '1px solid rgba(108, 99, 255, 0.5)',
+                        padding: '3px 10px',
+                        borderRadius: '16px',
+                        fontWeight: 700
+                      }}>
+                        🖥️ {currentScreenSharer?.userName} Sharing Screen
+                      </span>
+                    )}
                   </div>
                   <div style={{ display: 'flex', gap: '16px', alignItems: 'center', flexWrap: 'wrap' }}>
                     <span style={{ color: '#3ecfcf', fontSize: '0.85rem', fontWeight: 600 }}>
@@ -291,8 +445,9 @@ export default function VoiceRoomsPage() {
                   </div>
                 </div>
 
-                {/* Discord Bar Controls */}
+                {/* Discord Bar Controls (Audio + Screen Share + Leave) */}
                 <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+                  {/* Microphone Mute */}
                   <button
                     onClick={toggleMute}
                     style={{
@@ -313,6 +468,7 @@ export default function VoiceRoomsPage() {
                     <span>{isMuted ? 'Unmute' : 'Mute'}</span>
                   </button>
 
+                  {/* Deafen Audio */}
                   <button
                     onClick={toggleDeafen}
                     style={{
@@ -333,6 +489,72 @@ export default function VoiceRoomsPage() {
                     <span>{isDeafened ? 'Undeafen' : 'Deafen'}</span>
                   </button>
 
+                  {/* Step 2: Controlled Screen Share Button */}
+                  {isScreenSharing ? (
+                    <button
+                      onClick={stopScreenShare}
+                      style={{
+                        padding: '10px 18px',
+                        borderRadius: '12px',
+                        fontWeight: 700,
+                        fontSize: '0.88rem',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px',
+                        background: 'rgba(255, 77, 77, 0.25)',
+                        color: '#ff4d4d',
+                        border: '1px solid rgba(255, 77, 77, 0.5)',
+                        boxShadow: '0 0 15px rgba(255, 77, 77, 0.3)'
+                      }}
+                    >
+                      <span>🛑</span>
+                      <span>Stop Sharing</span>
+                    </button>
+                  ) : isSomeoneSharing ? (
+                    <button
+                      disabled
+                      title={`Screen share active by ${currentScreenSharer?.userName}. Only one member can share at a time.`}
+                      style={{
+                        padding: '10px 18px',
+                        borderRadius: '12px',
+                        fontWeight: 600,
+                        fontSize: '0.85rem',
+                        cursor: 'not-allowed',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px',
+                        background: 'rgba(255, 255, 255, 0.05)',
+                        color: 'rgba(240, 240, 255, 0.4)',
+                        border: '1px solid rgba(255, 255, 255, 0.1)'
+                      }}
+                    >
+                      <span>🖥️</span>
+                      <span>Screen Active</span>
+                    </button>
+                  ) : (
+                    <button
+                      onClick={startScreenShare}
+                      style={{
+                        padding: '10px 18px',
+                        borderRadius: '12px',
+                        fontWeight: 700,
+                        fontSize: '0.88rem',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px',
+                        background: 'linear-gradient(135deg, rgba(108, 99, 255, 0.25) 0%, rgba(62, 207, 207, 0.25) 100%)',
+                        color: '#3ecfcf',
+                        border: '1px solid rgba(62, 207, 207, 0.4)'
+                      }}
+                    >
+                      <span>🖥️</span>
+                      <span>Share Screen</span>
+                    </button>
+                  )}
+
+                  {/* Disconnect Button */}
                   <button
                     onClick={leaveRoom}
                     style={{
@@ -354,6 +576,16 @@ export default function VoiceRoomsPage() {
                   </button>
                 </div>
               </div>
+
+              {/* ── Step 2: Screen Sharing Theater Viewport ───── */}
+              {activeScreenStream && (
+                <ScreenShareTheater
+                  stream={activeScreenStream}
+                  isLocal={isScreenSharing}
+                  sharerName={currentScreenSharer?.userName || 'Study Partner'}
+                  onStop={stopScreenShare}
+                />
+              )}
 
               {/* Main Content Area: 6-Member Grid + Live Chat */}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 380px', gap: '24px' }}>
@@ -379,18 +611,27 @@ export default function VoiceRoomsPage() {
                       if (p) {
                         const isSpeaking = activeSpeakers[p.user_id];
                         const isHost = currentRoom?.host_id === p.user_id || p.user_name?.includes('(Host)');
+                        const isThisUserScreenSharing = currentScreenSharer?.peerId === p.user_id;
 
                         return (
                           <div
                             key={p.id || p.user_id}
                             style={{
                               background: 'rgba(25, 27, 60, 0.65)',
-                              border: isSpeaking ? '2.5px solid #23a55a' : '1px solid rgba(255, 255, 255, 0.1)',
+                              border: isThisUserScreenSharing
+                                ? '2.5px solid #a78bfa'
+                                : isSpeaking
+                                ? '2.5px solid #23a55a'
+                                : '1px solid rgba(255, 255, 255, 0.1)',
                               borderRadius: '20px',
                               padding: '28px 16px',
                               textAlign: 'center',
                               position: 'relative',
-                              boxShadow: isSpeaking ? '0 0 25px rgba(35, 165, 90, 0.45)' : 'none',
+                              boxShadow: isThisUserScreenSharing
+                                ? '0 0 25px rgba(167, 139, 250, 0.4)'
+                                : isSpeaking
+                                ? '0 0 25px rgba(35, 165, 90, 0.45)'
+                                : 'none',
                               transition: 'all 0.15s ease',
                               display: 'flex',
                               flexDirection: 'column',
@@ -406,17 +647,35 @@ export default function VoiceRoomsPage() {
                               </span>
                             )}
 
-                            {/* Speaking Icon */}
-                            <span style={{ position: 'absolute', top: '10px', right: '12px', fontSize: '0.8rem' }}>
-                              {p.is_muted ? '🔇' : isSpeaking ? '🔊' : '🎧'}
-                            </span>
+                            {/* Status Icons */}
+                            <div style={{ position: 'absolute', top: '10px', right: '12px', display: 'flex', gap: '6px', alignItems: 'center' }}>
+                              {isThisUserScreenSharing && (
+                                <span style={{
+                                  fontSize: '0.65rem',
+                                  background: 'rgba(167, 139, 250, 0.3)',
+                                  color: '#c4b5fd',
+                                  padding: '2px 6px',
+                                  borderRadius: '6px',
+                                  fontWeight: 800
+                                }}>
+                                  SCREEN
+                                </span>
+                              )}
+                              <span style={{ fontSize: '0.8rem' }}>
+                                {p.is_muted ? '🔇' : isSpeaking ? '🔊' : '🎧'}
+                              </span>
+                            </div>
 
                             {/* Avatar with Discord-style Green Halo */}
                             <div style={{
                               width: '64px',
                               height: '64px',
                               borderRadius: '50%',
-                              background: isSpeaking ? '#23a55a' : 'linear-gradient(135deg, #6c63ff 0%, #3ecfcf 100%)',
+                              background: isThisUserScreenSharing
+                                ? 'linear-gradient(135deg, #a78bfa 0%, #6c63ff 100%)'
+                                : isSpeaking
+                                ? '#23a55a'
+                                : 'linear-gradient(135deg, #6c63ff 0%, #3ecfcf 100%)',
                               display: 'flex',
                               alignItems: 'center',
                               justifyContent: 'center',
@@ -434,8 +693,8 @@ export default function VoiceRoomsPage() {
                               {p.user_name}
                             </div>
 
-                            <div style={{ fontSize: '0.72rem', color: isSpeaking ? '#23a55a' : 'rgba(240, 240, 255, 0.45)', marginTop: '4px', fontWeight: 600 }}>
-                              {p.is_muted ? 'Muted' : isSpeaking ? 'Speaking...' : 'Connected'}
+                            <div style={{ fontSize: '0.72rem', color: isThisUserScreenSharing ? '#a78bfa' : isSpeaking ? '#23a55a' : 'rgba(240, 240, 255, 0.45)', marginTop: '4px', fontWeight: 600 }}>
+                              {isThisUserScreenSharing ? '🖥️ Sharing Screen' : p.is_muted ? 'Muted' : isSpeaking ? 'Speaking...' : 'Connected'}
                             </div>
                           </div>
                         );
@@ -481,7 +740,7 @@ export default function VoiceRoomsPage() {
                   background: 'rgba(18, 19, 45, 0.75)',
                   display: 'flex',
                   flexDirection: 'column',
-                  maxHeight: '440px'
+                  maxHeight: activeScreenStream ? '520px' : '440px'
                 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '14px', borderBottom: '1px solid rgba(255, 255, 255, 0.06)', paddingBottom: '10px' }}>
                     <span>💬</span>
@@ -543,11 +802,11 @@ export default function VoiceRoomsPage() {
                   <h1 style={{ fontSize: '2rem', fontWeight: 800, marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '12px' }}>
                     🎙️ Collaborative Voice Rooms
                     <span style={{ fontSize: '0.75rem', background: 'rgba(62,207,207,0.15)', color: '#3ecfcf', border: '1px solid rgba(62,207,207,0.3)', padding: '4px 12px', borderRadius: '20px' }}>
-                      Max 6 Members
+                      Max 6 Members + Screen Share
                     </span>
                   </h1>
                   <p style={{ color: 'rgba(240,240,255,0.55)', fontSize: '0.95rem' }}>
-                    Discord-style peer voice channels. Connect with study partners from any laptop, tablet, or phone.
+                    Discord-style peer voice rooms with controlled screen sharing. Connect with study partners from any laptop, tablet, or phone.
                   </p>
                 </div>
                 <button
@@ -564,7 +823,7 @@ export default function VoiceRoomsPage() {
                 <div>
                   <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '4px' }}>🔑 Enter a 6-Digit Room Code</h3>
                   <p style={{ fontSize: '0.85rem', color: 'rgba(240,240,255,0.5)', margin: 0 }}>
-                    Enter the code shared by your classmate. The host will get a join request to admit you into the room.
+                    Enter the code shared by your classmate to join their room instantly.
                   </p>
                 </div>
                 <form onSubmit={handleJoinByCode} style={{ display: 'flex', gap: '10px' }}>
@@ -656,13 +915,13 @@ export default function VoiceRoomsPage() {
 
               {/* How it works */}
               <div className="glass-card" style={{ marginTop: '32px', padding: '24px 28px', borderRadius: '20px', border: '1px solid rgba(255,255,255,0.06)' }}>
-                <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '14px', color: 'rgba(240,240,255,0.8)' }}>🛈 How Discord-Style Voice Rooms Work</h3>
+                <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '14px', color: 'rgba(240,240,255,0.8)' }}>🛈 How Voice & Screen Share Work</h3>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px,1fr))', gap: '16px' }}>
                   {[
-                    { icon: '➕', title: '1. Create a room', desc: 'Click Create Voice Room and get your 6-digit room code.' },
-                    { icon: '📤', title: '2. Share with classmates', desc: 'Share the code on WhatsApp or text with up to 5 classmates.' },
-                    { icon: '🔔', title: '3. Host approves join', desc: 'When someone joins with the code, the host receives a request to admit them.' },
-                    { icon: '🎧', title: '4. Talk live like Discord', desc: 'Crystal-clear Opus audio with noise cancellation and active speaker green halos.' },
+                    { icon: '➕', title: '1. Create a room', desc: 'Click Create Voice Room, enter your topic, and get your 6-digit code.' },
+                    { icon: '📤', title: '2. Share with classmates', desc: 'Send the 6-digit code to up to 5 classmates to join from any device.' },
+                    { icon: '🎙️', title: '3. Discord audio with VAD', desc: 'Crystal-clear Opus voice chat with green halos showing who is speaking.' },
+                    { icon: '🖥️', title: '4. Controlled Screen Sharing', desc: 'One member can share their screen or slides at a time with full theater view.' },
                   ].map(s => (
                     <div key={s.title} style={{ background: 'rgba(255,255,255,0.03)', borderRadius: '12px', padding: '14px 16px' }}>
                       <div style={{ fontSize: '1.4rem', marginBottom: '6px' }}>{s.icon}</div>
@@ -724,7 +983,7 @@ export default function VoiceRoomsPage() {
                   </div>
 
                   <div style={{ background: 'rgba(62,207,207,0.08)', padding: '12px 16px', borderRadius: '12px', border: '1px solid rgba(62,207,207,0.2)', fontSize: '0.82rem', color: '#3ecfcf' }}>
-                    👥 Max 6 members. Supports peer learning with live audio, speaking detection, and in-room chat.
+                    👥 Max 6 members. Supports peer learning with live audio, speaking detection, controlled screen sharing, and chat.
                   </div>
 
                   <div style={{ display: 'flex', gap: '12px', marginTop: '6px' }}>
