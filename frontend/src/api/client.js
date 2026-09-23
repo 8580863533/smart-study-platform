@@ -4,7 +4,7 @@ export const API_BASE = import.meta.env.VITE_API_BASE_URL || 'https://smart-stud
 
 // Set global axios defaults
 axios.defaults.baseURL = API_BASE;
-axios.defaults.timeout = 8000;
+axios.defaults.timeout = 4000;
 
 // --- Global Axios Defaults and Interceptors ---
 axios.interceptors.request.use(
@@ -22,9 +22,11 @@ axios.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      localStorage.removeItem('token');
-      localStorage.removeItem('user');
-      window.location.href = '/login';
+      const url = error.config?.url || '';
+      if (!url.includes('/auth/login') && !url.includes('/auth/register')) {
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+      }
     }
     return Promise.reject(error);
   }
@@ -34,7 +36,7 @@ axios.interceptors.response.use(
 const client = axios.create({
   baseURL: API_BASE,
   headers: { 'Content-Type': 'application/json' },
-  timeout: 8000,
+  timeout: 4000,
 });
 
 // --- Request Interceptor: attach JWT ---
@@ -54,9 +56,11 @@ client.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      localStorage.removeItem('token');
-      localStorage.removeItem('user');
-      window.location.href = '/login';
+      const url = error.config?.url || '';
+      if (!url.includes('/auth/login') && !url.includes('/auth/register')) {
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+      }
     }
     return Promise.reject(error);
   }
