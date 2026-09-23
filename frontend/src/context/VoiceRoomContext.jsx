@@ -96,11 +96,18 @@ function playChime(type) {
   } catch (e) {}
 }
 
+// ── FIX: publishSignal uses text/plain so ntfy.sh delivers the JSON as the message body ──
+// ntfy.sh with Content-Type: application/json interprets the body as a notification
+// meta-object (looking for "topic", "message" fields) and does NOT relay the payload.
+// With Content-Type: text/plain the entire body becomes the message string, which
+// the WebSocket listener then parses correctly via payload.message.
 async function publishSignal(topic, eventData) {
   try {
     await fetch(`https://ntfy.sh/${topic}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'text/plain',   // KEY FIX: was 'application/json'
+      },
       body: JSON.stringify(eventData),
       mode: 'cors'
     });
@@ -142,6 +149,10 @@ export function VoiceRoomProvider({ children }) {
   const currentScreenSharerRef = useRef(null);
   const wsRef = useRef(null);
   const myPeerIdRef = useRef(null);
+  // ── FIX: ICE candidate buffer — holds candidates received before remote description is set ──
+  const pendingIceCandidatesRef = useRef({}); // map: peerId -> RTCIceCandidate[]
+  // Track whether we have set remote description for each peer
+  const remoteDescSetRef = useRef({}); // map: peerId -> bool
 
   useEffect(() => { currentRoomRef.current = currentRoom; }, [currentRoom]);
   useEffect(() => { isMutedRef.current = isMuted; }, [isMuted]);
@@ -172,7 +183,7 @@ export function VoiceRoomProvider({ children }) {
       // Add audio tracks to all existing peer connections
       Object.values(peerConnectionsRef.current).forEach(pc => {
         stream.getAudioTracks().forEach(track => {
-          pc.addTrack(track, stream);
+          try { pc.addTrack(track, stream); } catch (e) {}
         });
       });
 
@@ -360,19 +371,37 @@ export function VoiceRoomProvider({ children }) {
     addToast('Screen sharing stopped.', 'info');
   };
 
+  // ── FIX: Apply buffered ICE candidates after remote description is set ───────
+  const applyPendingIceCandidates = async (peerId, pc) => {
+    const pending = pendingIceCandidatesRef.current[peerId] || [];
+    if (pending.length === 0) return;
+    console.log(`[WebRTC] Applying ${pending.length} buffered ICE candidates for ${peerId}`);
+    for (const candidate of pending) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (err) {
+        console.warn('Buffered ICE candidate add error:', err);
+      }
+    }
+    pendingIceCandidatesRef.current[peerId] = [];
+  };
+
   // ── Step 1 & 6: RTCPeerConnection Setup (Audio + Video Tracks) ──────────────
   const createPeerConnection = (targetPeerId, isInitiator = false) => {
     if (peerConnectionsRef.current[targetPeerId]) {
       return peerConnectionsRef.current[targetPeerId];
     }
 
+    console.log(`[WebRTC] Creating peer connection with ${targetPeerId}, initiator=${isInitiator}`);
     const pc = new RTCPeerConnection(RTC_CONFIG);
     peerConnectionsRef.current[targetPeerId] = pc;
+    remoteDescSetRef.current[targetPeerId] = false;
+    pendingIceCandidatesRef.current[targetPeerId] = [];
 
     // Add local microphone audio track
     if (localStreamRef.current) {
       localStreamRef.current.getAudioTracks().forEach(track => {
-        pc.addTrack(track, localStreamRef.current);
+        try { pc.addTrack(track, localStreamRef.current); } catch (e) {}
       });
     }
 
@@ -380,8 +409,10 @@ export function VoiceRoomProvider({ children }) {
     if (localScreenStreamRef.current) {
       const videoTrack = localScreenStreamRef.current.getVideoTracks()[0];
       if (videoTrack) {
-        const sender = pc.addTrack(videoTrack, localScreenStreamRef.current);
-        screenSendersRef.current[targetPeerId] = sender;
+        try {
+          const sender = pc.addTrack(videoTrack, localScreenStreamRef.current);
+          screenSendersRef.current[targetPeerId] = sender;
+        } catch (e) {}
       }
     }
 
@@ -402,9 +433,11 @@ export function VoiceRoomProvider({ children }) {
       const stream = event.streams && event.streams[0] ? event.streams[0] : new MediaStream([event.track]);
 
       if (event.track.kind === 'audio') {
+        console.log(`[WebRTC] Received remote audio track from ${targetPeerId}`);
         playRemoteAudio(targetPeerId, stream);
       } else if (event.track.kind === 'video') {
         // Remote peer is screen sharing
+        console.log(`[WebRTC] Received remote video/screen track from ${targetPeerId}`);
         setRemoteScreenStream(stream);
         event.track.onended = () => {
           setRemoteScreenStream(null);
@@ -413,11 +446,17 @@ export function VoiceRoomProvider({ children }) {
     };
 
     pc.oniceconnectionstatechange = () => {
+      console.log(`[WebRTC] ICE state with ${targetPeerId}: ${pc.iceConnectionState}`);
       if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
         setConnectionStatus('connected');
       } else if (pc.iceConnectionState === 'failed') {
+        console.warn(`[WebRTC] ICE failed for ${targetPeerId}, restarting`);
         try { pc.restartIce(); } catch (e) {}
       }
+    };
+
+    pc.onconnectionstatechange = () => {
+      console.log(`[WebRTC] Connection state with ${targetPeerId}: ${pc.connectionState}`);
     };
 
     if (isInitiator) {
@@ -485,19 +524,32 @@ export function VoiceRoomProvider({ children }) {
 
       if (room_info) {
         setCurrentRoom(room_info);
+        currentRoomRef.current = room_info;
         setParticipants(room_info.participants || []);
         if (room_info.currentScreenSharer) {
           setCurrentScreenSharer(room_info.currentScreenSharer);
         }
       }
 
-      await startLocalAudio();
+      const localStream = await startLocalAudio();
+
+      // ── FIX: Send new-peer announcement so existing peers initiate connections ──
       sendSignal({
         event: 'new-peer',
         from_peer_id: myId,
         user_name: user?.name || 'Study Partner',
         room_code: currentRoomRef.current?.room_code,
       });
+
+      // ── FIX: Joiner initiates connections to all existing peers in the room ──
+      // room_info.participants contains the already-in-room participants (excluding joiner)
+      const existingPeers = (room_info?.participants || []).filter(p => p.user_id !== myId);
+      for (const peer of existingPeers) {
+        if (peer.user_id && peer.user_id !== myId) {
+          console.log(`[WebRTC] Joiner initiating connection to existing peer: ${peer.user_id}`);
+          createPeerConnection(peer.user_id, true);
+        }
+      }
       return;
     }
 
@@ -526,16 +578,25 @@ export function VoiceRoomProvider({ children }) {
         return updated;
       });
 
-      // Existing peers initiate WebRTC connection with the new peer
+      // ── FIX: Ensure local audio is ready before creating peer connection ─────
+      if (!localStreamRef.current) {
+        await startLocalAudio();
+      }
+
+      // Existing peers (host + already-joined) initiate WebRTC with the new peer
       createPeerConnection(from_peer_id, true);
       return;
     }
 
     // ── 5. WebRTC SDP Offer ───────────────────────────────────────────────────
     if (event === 'sdp-offer' && to_peer_id === myId && sdp) {
+      console.log(`[WebRTC] Received SDP offer from ${from_peer_id}`);
       const pc = createPeerConnection(from_peer_id, false);
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+        remoteDescSetRef.current[from_peer_id] = true;
+        // Apply any buffered ICE candidates now that remote description is set
+        await applyPendingIceCandidates(from_peer_id, pc);
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         sendSignal({
@@ -553,10 +614,14 @@ export function VoiceRoomProvider({ children }) {
 
     // ── 6. WebRTC SDP Answer ──────────────────────────────────────────────────
     if (event === 'sdp-answer' && to_peer_id === myId && sdp) {
+      console.log(`[WebRTC] Received SDP answer from ${from_peer_id}`);
       const pc = peerConnectionsRef.current[from_peer_id];
       if (pc) {
         try {
           await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+          remoteDescSetRef.current[from_peer_id] = true;
+          // Apply any buffered ICE candidates
+          await applyPendingIceCandidates(from_peer_id, pc);
         } catch (err) {
           console.warn('Error setting SDP answer:', err);
         }
@@ -567,10 +632,20 @@ export function VoiceRoomProvider({ children }) {
     // ── 7. ICE Candidate ──────────────────────────────────────────────────────
     if (event === 'ice-candidate' && to_peer_id === myId && candidate) {
       const pc = peerConnectionsRef.current[from_peer_id];
-      if (pc) {
+      if (pc && remoteDescSetRef.current[from_peer_id]) {
+        // Remote description already set — apply immediately
         try {
           await pc.addIceCandidate(new RTCIceCandidate(candidate));
-        } catch (err) {}
+        } catch (err) {
+          console.warn('ICE candidate add error:', err);
+        }
+      } else {
+        // ── FIX: Buffer the candidate until remote description is ready ─────────
+        console.log(`[WebRTC] Buffering ICE candidate for ${from_peer_id} (remote desc not set yet)`);
+        if (!pendingIceCandidatesRef.current[from_peer_id]) {
+          pendingIceCandidatesRef.current[from_peer_id] = [];
+        }
+        pendingIceCandidatesRef.current[from_peer_id].push(candidate);
       }
       return;
     }
@@ -607,6 +682,8 @@ export function VoiceRoomProvider({ children }) {
         try { remoteAudiosRef.current[from_peer_id].remove(); } catch (e) {}
         delete remoteAudiosRef.current[from_peer_id];
       }
+      delete pendingIceCandidatesRef.current[from_peer_id];
+      delete remoteDescSetRef.current[from_peer_id];
       if (currentScreenSharerRef.current?.peerId === from_peer_id) {
         setCurrentScreenSharer(null);
         currentScreenSharerRef.current = null;
@@ -622,6 +699,9 @@ export function VoiceRoomProvider({ children }) {
   };
 
   // ── WebSocket Signaling Connection ──────────────────────────────────────────
+  // FIX: ntfy.sh WebSocket delivers messages as:
+  //   { "id":"...", "time":..., "event":"message", "topic":"...", "message": "<your text body>" }
+  // where "message" is the plain-text body we POSTed. We JSON.parse it to get the signal.
   const connectSignalingWebSocket = (roomCode) => {
     if (wsRef.current) {
       try { wsRef.current.close(); } catch (e) {}
@@ -632,37 +712,64 @@ export function VoiceRoomProvider({ children }) {
     const ws = new WebSocket(`wss://ntfy.sh/${topic}/ws`);
     wsRef.current = ws;
 
+    ws.onopen = () => {
+      console.log(`[Signaling] WebSocket connected for room ${roomCode}`);
+    };
+
     ws.onmessage = (e) => {
       try {
         const payload = JSON.parse(e.data);
-        if (payload && payload.message) {
+        // ntfy.sh delivers: { event: "message", message: "<our JSON string>" }
+        if (payload && payload.event === 'message' && payload.message) {
           const inner = JSON.parse(payload.message);
           handleSignalMessage(inner);
+        } else if (payload && payload.message) {
+          // Some ntfy.sh versions may have different structure
+          try {
+            const inner = JSON.parse(payload.message);
+            handleSignalMessage(inner);
+          } catch (_) {}
         }
-      } catch (err) {}
+      } catch (err) {
+        // Ignore keepalive or malformed messages
+      }
     };
 
-    ws.onerror = () => {
+    ws.onerror = (err) => {
+      console.warn('[Signaling] WebSocket error, falling back to SSE');
       fallbackToSSE(roomCode);
     };
 
     ws.onclose = () => {
+      // ── FIX: Only reconnect if we're still in THIS room (not after leaving) ──
       if (currentRoomRef.current?.room_code === roomCode) {
-        setTimeout(() => connectSignalingWebSocket(roomCode), 2000);
+        console.log(`[Signaling] WebSocket closed for room ${roomCode}, reconnecting in 2s...`);
+        setTimeout(() => {
+          if (currentRoomRef.current?.room_code === roomCode) {
+            connectSignalingWebSocket(roomCode);
+          }
+        }, 2000);
       }
     };
   };
 
   const fallbackToSSE = (roomCode) => {
     const topic = SIGNAL_TOPIC_PREFIX + roomCode;
+    console.log(`[Signaling] Starting SSE fallback for room ${roomCode}`);
     const es = new EventSource(`https://ntfy.sh/${topic}/sse`);
     es.onmessage = (e) => {
       try {
         const payload = JSON.parse(e.data);
-        if (payload && payload.message) {
+        if (payload && payload.event === 'message' && payload.message) {
           handleSignalMessage(JSON.parse(payload.message));
+        } else if (payload && payload.message) {
+          try { handleSignalMessage(JSON.parse(payload.message)); } catch (_) {}
         }
       } catch (err) {}
+    };
+    es.onerror = () => {
+      console.warn('[Signaling] SSE also failed');
+      es.close();
     };
   };
 
@@ -677,6 +784,8 @@ export function VoiceRoomProvider({ children }) {
       try { pc.close(); } catch (e) {}
     });
     peerConnectionsRef.current = {};
+    pendingIceCandidatesRef.current = {};
+    remoteDescSetRef.current = {};
     setConnectionStatus('disconnected');
     setCurrentRoom(null);
     setParticipants([]);
@@ -709,6 +818,7 @@ export function VoiceRoomProvider({ children }) {
     setCurrentRoom(updatedRoom);
     currentRoomRef.current = updatedRoom;
 
+    // ── FIX: Include all existing participant IDs so joiner can connect to them ──
     sendSignal({
       event: 'approve-join',
       to_peer_id: peerId,

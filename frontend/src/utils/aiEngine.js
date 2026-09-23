@@ -311,6 +311,7 @@ export function ingestAndIndexDocument(rawText, docId = 'doc-1', docTitle = 'Stu
 /**
  * STEP 3: Accurate Multi-Page Question Answering via Vector Similarity Search
  * Returns concise, contextual answer with source citations (e.g. Page 3, Section 2).
+ * Returns "not found" response when content is not in the document.
  */
 export function answerQuestionFromText(question, text, cachedVectorIndex = null) {
   if (!question || !question.trim()) {
@@ -326,7 +327,17 @@ export function answerQuestionFromText(question, text, cachedVectorIndex = null)
   // 1. Obtain or generate vector index
   let index = cachedVectorIndex;
   if (!index || !index.chunks || index.chunks.length === 0) {
-    const rawContent = text || getStoredDocuments()[0]?.content || '';
+    // Only build from provided text — do NOT fall back to stored documents
+    const rawContent = text || '';
+    if (!rawContent || rawContent.trim().length < 20) {
+      return {
+        answer: 'No document content available. Please upload a PDF first.',
+        confidence: 0.0,
+        source_passage: '',
+        page_number: 1,
+        section_name: 'N/A'
+      };
+    }
     const chunks = splitIntoSemanticChunks(rawContent, 'auto_doc');
     index = buildVectorIndex(chunks, 'auto_doc');
   }
@@ -389,8 +400,21 @@ export function answerQuestionFromText(question, text, cachedVectorIndex = null)
   ranked.sort((a, b) => b.score - a.score);
 
   const topMatch = ranked[0];
-  const bestChunk = topMatch && topMatch.score > 0.05 ? topMatch.chunk : index.chunks[0];
-  const bestScore = topMatch ? topMatch.score : 0.1;
+  const bestScore = topMatch ? topMatch.score : 0;
+
+  // ── Not found: return honest "not found" instead of a random chunk ──────────
+  if (!topMatch || bestScore < 0.05) {
+    return {
+      answer: "I couldn't find this information in the uploaded PDF. Try rephrasing your question or ask about a topic that is covered in the document.",
+      confidence: 0.0,
+      source_passage: '',
+      page_number: 1,
+      section_name: 'N/A',
+      relevance_score: 0
+    };
+  }
+
+  const bestChunk = topMatch.chunk;
 
   // 4. Extract most accurate answering sentence from top chunk
   const chunkText = bestChunk.text.replace(/---\s*Page\s*\d+\s*---/gi, '').trim();
@@ -444,12 +468,49 @@ export function answerQuestionFromText(question, text, cachedVectorIndex = null)
   };
 }
 
+// ── Utility: score a sentence by information density ─────────────────────────
+function scoreSentence(sentence, allChunkTokenSets) {
+  const words = sentence.split(/\s+/).filter(Boolean);
+  if (words.length < 6) return 0;
+
+  // Prefer longer sentences with more unique non-stop words
+  const unique = new Set(words.map(w => w.toLowerCase()).filter(w => !STOP_WORDS.has(w)));
+  const densityScore = unique.size;
+
+  // Prefer sentences with definitions, conclusions, or key terms
+  const hasKeyPattern = /\b(is|are|defined as|refers to|consists|enables|prevents|results in|means|represents|includes|shows|demonstrates|proves|concludes|therefore|because|hence)\b/i.test(sentence);
+  const hasNumber = /\d/.test(sentence);
+
+  return densityScore + (hasKeyPattern ? 5 : 0) + (hasNumber ? 2 : 0);
+}
+
+// ── Utility: check if two sentences are too similar (deduplication) ───────────
+function isTooSimilar(a, b, threshold = 0.55) {
+  if (!a || !b) return false;
+  const aWords = new Set(a.toLowerCase().split(/\s+/).filter(w => !STOP_WORDS.has(w) && w.length > 3));
+  const bWords = new Set(b.toLowerCase().split(/\s+/).filter(w => !STOP_WORDS.has(w) && w.length > 3));
+  if (aWords.size === 0 || bWords.size === 0) return false;
+  let overlap = 0;
+  aWords.forEach(w => { if (bWords.has(w)) overlap++; });
+  const jaccard = overlap / (aWords.size + bWords.size - overlap);
+  return jaccard >= threshold;
+}
+
 /**
- * STEP 4: Structured Multi-Chunk Summarization
- * Generates an executive overview, section breakdowns, and high-yield takeaways.
+ * STEP 4: Structured Multi-Chunk Summarization — FIXED
+ *
+ * Generates an executive overview, section breakdowns, and high-yield takeaways
+ * that cover the ENTIRE document (not just the first 3 chunks or first sentences).
+ *
+ * Algorithm:
+ * 1. Score every sentence in every chunk by information density.
+ * 2. Select best sentence(s) per chunk, deduplicate across chunks.
+ * 3. Distribute bullet coverage proportionally across beginning/middle/end.
+ * 4. Build executive overview from sampled high-density sentences across whole doc.
+ * 5. Build section breakdown for ALL distinct sections (cap at 12).
  */
 export function summarizeDocumentStructured(text, cachedVectorIndex = null) {
-  const rawText = text || getStoredDocuments()[0]?.content || '';
+  const rawText = text || '';
   const clean = normalizeDocumentText(rawText);
   const words = clean.split(/\s+/).filter(Boolean);
   const originalWordCount = words.length || 200;
@@ -459,44 +520,168 @@ export function summarizeDocumentStructured(text, cachedVectorIndex = null) {
     chunks = splitIntoSemanticChunks(clean, 'temp_sum', { targetWords: 350 });
   }
 
-  const executiveSentences = [];
-  const sectionBreakdowns = [];
-  const keyTakeaways = [];
+  if (!chunks || chunks.length === 0) {
+    return {
+      executive_summary: 'No content available for summarization.',
+      section_breakdowns: [],
+      summary_bullets: [],
+      original_word_count: originalWordCount,
+      word_count: 0,
+      compression_ratio: 0,
+      xp_earned: 0
+    };
+  }
 
-  chunks.forEach((chunk, idx) => {
+  // ── Step 1: Score and select best sentence(s) from EVERY chunk ─────────────
+  const chunkBestSentences = chunks.map(chunk => {
     const chunkClean = chunk.text.replace(/---\s*Page\s*\d+\s*---/gi, '').trim();
     const sentences = chunkClean
       .split(/(?<=[.?!])\s+/)
       .map(s => s.trim())
-      .filter(s => s.length > 25);
+      .filter(s => s.length > 30 && s.length < 350);
 
-    if (sentences.length > 0) {
-      // Pick top 2 most informative sentences
-      const primary = sentences[0];
-      const secondary = sentences[Math.min(1, sentences.length - 1)];
+    if (sentences.length === 0) {
+      return { best: chunkClean.substring(0, 200), section: chunk.section_name, page: chunk.page_number, score: 0 };
+    }
 
-      if (idx < 3) {
-        executiveSentences.push(primary);
+    let bestSentence = sentences[0];
+    let bestScore = -1;
+
+    for (const sentence of sentences) {
+      const score = scoreSentence(sentence, null);
+      if (score > bestScore) {
+        bestScore = score;
+        bestSentence = sentence;
       }
-      keyTakeaways.push(primary);
+    }
 
-      sectionBreakdowns.push({
-        section: chunk.section_name || `Topic Section ${idx + 1}`,
-        page: chunk.page_number || 1,
-        summary: primary + (secondary && secondary !== primary ? ' ' + secondary : '')
-      });
+    return {
+      best: bestSentence,
+      second: sentences.length > 1 ? sentences[1] : '',
+      section: chunk.section_name || `Section ${chunk.chunk_index + 1}`,
+      page: chunk.page_number || 1,
+      score: bestScore
+    };
+  });
+
+  // ── Step 2: Deduplicated summary bullets — spread across whole document ─────
+  // Divide document into thirds; take proportional top bullets from each third
+  const third = Math.ceil(chunkBestSentences.length / 3);
+  const thirds = [
+    chunkBestSentences.slice(0, third),
+    chunkBestSentences.slice(third, third * 2),
+    chunkBestSentences.slice(third * 2)
+  ];
+
+  const targetBullets = Math.min(12, Math.max(6, Math.ceil(chunks.length * 0.4)));
+  const perThird = Math.ceil(targetBullets / 3);
+
+  const summaryBullets = [];
+
+  thirds.forEach(section => {
+    // Sort by score descending within each third
+    const sorted = [...section].sort((a, b) => b.score - a.score);
+    let taken = 0;
+    for (const item of sorted) {
+      if (taken >= perThird) break;
+      if (!item.best || item.best.length < 20) continue;
+      // Deduplicate
+      const isDuplicate = summaryBullets.some(existing => isTooSimilar(existing, item.best));
+      if (!isDuplicate) {
+        summaryBullets.push(item.best);
+        taken++;
+      }
     }
   });
 
-  const executiveSummary = executiveSentences.join(' ');
-  const finalBullets = keyTakeaways.slice(0, 8);
-  const summaryWordCount = finalBullets.join(' ').split(/\s+/).length + executiveSummary.split(/\s+/).length;
-  const compressionRatio = Math.max(0.2, Number(((originalWordCount - summaryWordCount) / originalWordCount).toFixed(2)));
+  // ── Step 3: Executive overview — sample from beginning, middle, end ─────────
+  const execCandidates = [];
+  const sampleIndices = new Set();
+
+  // Always include first chunk
+  sampleIndices.add(0);
+  // Always include last chunk
+  sampleIndices.add(chunkBestSentences.length - 1);
+  // Sample from middle
+  const midStart = Math.floor(chunkBestSentences.length * 0.3);
+  const midEnd = Math.floor(chunkBestSentences.length * 0.7);
+  // Pick highest-scoring chunk from middle third
+  let midBestScore = -1, midBestIdx = Math.floor(chunkBestSentences.length / 2);
+  for (let i = midStart; i <= midEnd; i++) {
+    if (chunkBestSentences[i]?.score > midBestScore) {
+      midBestScore = chunkBestSentences[i].score;
+      midBestIdx = i;
+    }
+  }
+  sampleIndices.add(midBestIdx);
+
+  // Add 2-3 more high-scoring sentences spread across the document
+  const scoreRanked = chunkBestSentences
+    .map((item, idx) => ({ ...item, idx }))
+    .sort((a, b) => b.score - a.score);
+
+  for (const item of scoreRanked) {
+    if (sampleIndices.size >= 5) break;
+    sampleIndices.add(item.idx);
+  }
+
+  // Sort sample indices back to document order for coherent overview
+  const sortedSampleIndices = Array.from(sampleIndices).sort((a, b) => a - b);
+  sortedSampleIndices.forEach(idx => {
+    const item = chunkBestSentences[idx];
+    if (item?.best && !execCandidates.some(e => isTooSimilar(e, item.best))) {
+      execCandidates.push(item.best);
+    }
+  });
+
+  const executiveSummary = execCandidates.join(' ');
+
+  // ── Step 4: Section-by-Section Breakdown — all sections, cap at 12 ─────────
+  // Group chunks by section name
+  const sectionMap = new Map();
+  chunkBestSentences.forEach(item => {
+    const key = `${item.section}__pg${item.page}`;
+    if (!sectionMap.has(key)) {
+      sectionMap.set(key, { section: item.section, page: item.page, sentences: [] });
+    }
+    if (item.best && item.best.length > 20) {
+      sectionMap.get(key).sentences.push(item.best);
+      if (item.second && item.second.length > 20) {
+        sectionMap.get(key).sentences.push(item.second);
+      }
+    }
+  });
+
+  const sectionBreakdowns = [];
+  for (const [, secData] of sectionMap) {
+    if (sectionBreakdowns.length >= 12) break;
+    // Pick best non-duplicate sentence for this section
+    let secSummary = '';
+    for (const sentence of secData.sentences) {
+      if (!sectionBreakdowns.some(s => isTooSimilar(s.summary, sentence, 0.65))) {
+        secSummary = sentence;
+        break;
+      }
+    }
+    if (!secSummary && secData.sentences.length > 0) {
+      secSummary = secData.sentences[0];
+    }
+    if (secSummary) {
+      sectionBreakdowns.push({
+        section: secData.section,
+        page: secData.page,
+        summary: secSummary
+      });
+    }
+  }
+
+  const summaryWordCount = (summaryBullets.join(' ') + ' ' + executiveSummary).split(/\s+/).filter(Boolean).length;
+  const compressionRatio = Math.max(0.1, Number(((originalWordCount - summaryWordCount) / Math.max(originalWordCount, 1)).toFixed(2)));
 
   return {
     executive_summary: executiveSummary,
-    section_breakdowns: sectionBreakdowns.slice(0, 6),
-    summary_bullets: finalBullets,
+    section_breakdowns: sectionBreakdowns,
+    summary_bullets: summaryBullets,
     original_word_count: originalWordCount,
     word_count: summaryWordCount,
     compression_ratio: compressionRatio,
@@ -510,7 +695,7 @@ export function summarizeDocumentStructured(text, cachedVectorIndex = null) {
 export function summarizeTextContent(text, numBullets = 6) {
   const structured = summarizeDocumentStructured(text);
   return {
-    summary_bullets: structured.summary_bullets.slice(0, numBullets),
+    summary_bullets: structured.summary_bullets.slice(0, Math.max(numBullets, 8)),
     word_count: structured.word_count,
     original_word_count: structured.original_word_count,
     compression_ratio: structured.compression_ratio,
@@ -685,6 +870,8 @@ export function generateFlashcardsFromText(text, numCards = 8) {
 
 /**
  * Storage Helpers
+ * NOTE: getStoredDocuments() no longer returns a hardcoded fake document.
+ * It returns only real user-uploaded documents, or an empty array.
  */
 export function getStoredDocuments() {
   if (typeof localStorage !== 'undefined') {
@@ -698,53 +885,8 @@ export function getStoredDocuments() {
       console.warn('Failed to read stored documents:', e);
     }
   }
-
-  const defaultDoc = {
-    id: 'doc-ai-master-1',
-    title: 'Artificial Intelligence & Machine Learning (Comprehensive Course Notes)',
-    word_count: 1420,
-    file_type: 'pdf',
-    created_at: new Date().toISOString(),
-    content: `--- Page 1 ---
-Artificial Intelligence (AI) is the science and engineering of making intelligent machines, especially intelligent computer programs. Machine learning is a core branch of AI based on the concept that computational systems can learn from data, identify complex patterns, and make autonomous decisions with minimal human intervention.
-
---- Page 2 ---
-Deep learning is a subset of machine learning based on artificial neural networks with representation learning. Neural networks consist of multiple interconnected layers: input layers, hidden layers, and output layers that transform raw inputs into predictions.
-
---- Page 3 ---
-Supervised learning algorithms learn from labeled training datasets to predict continuous targets or classify items. Unsupervised learning uncovers hidden patterns and natural clusters without predefined labels. Reinforcement learning trains agents through an iterative feedback loop of rewards and penalties.
-
---- Page 4 ---
-Natural Language Processing (NLP) enables computers to understand, interpret, and generate human language. Key components of neural networks include activation functions (such as ReLU, Sigmoid, and LeakyReLU), learnable weights, biases, and loss functions (such as Mean Squared Error and Cross-Entropy).
-
---- Page 5 ---
-Backpropagation algorithms combined with gradient descent optimizers (such as Adam, RMSprop, and SGD) iteratively adjust network parameters to minimize prediction error.
-
---- Page 6 ---
-Convolutional Neural Networks (CNNs) are specialized for processing grid-like spatial data such as images and video, utilizing convolution filters, pooling layers, and batch normalization.
-
---- Page 7 ---
-Recurrent Neural Networks (RNNs) and Long Short-Term Memory (LSTM) networks process sequential and time-series data by maintaining hidden states across sequential time steps.
-
---- Page 8 ---
-Transformers introduce the Self-Attention mechanism, allowing models to compute contextual relationships between all tokens in a sequence simultaneously rather than recurrence.
-
---- Page 9 ---
-Model evaluation metrics include Accuracy, Precision, Recall, F1-Score, ROC-AUC curve, Mean Absolute Error (MAE), and Confusion Matrices.
-
---- Page 10 ---
-Overfitting occurs when a model memorizes noise in training data; it is prevented through Dropout regularization, L1/L2 weight decay, data augmentation, and Early Stopping.
-
---- Page 11 ---
-Transfer learning leverages pre-trained foundation models fine-tuned on specialized domain tasks to drastically reduce required compute and training time.
-
---- Page 12 ---
-Ethical AI considerations include fairness, bias mitigation, transparency, interpretability, and robust user data privacy safeguards.
-
---- Page 13 ---
-Emerging AI frontiers include multimodal foundation models, autonomous reasoning agents, neuromorphic computing, and quantum machine learning.`
-  };
-  return [defaultDoc];
+  // Return empty array — do NOT fall back to fake content
+  return [];
 }
 
 export function saveDocumentLocally(doc) {

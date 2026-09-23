@@ -168,7 +168,7 @@ export default function UploadPage() {
 
     setUploadProgress(100);
     setStatusMessage("Complete!");
-    addToast(`Saved ${docTitle} (${totalPagesCount} pages, ${wordCount} words) to library! +20 XP`, "success");
+    addToast(`Saved ${docTitle} (${totalPagesCount} pages, ${indexedDoc.word_count} words) to library! +20 XP`, "success");
 
     setTimeout(() => {
       navigate('/dashboard');

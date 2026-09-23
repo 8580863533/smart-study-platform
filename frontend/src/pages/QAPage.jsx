@@ -6,7 +6,7 @@ import VoiceButton from '../components/VoiceButton';
 import { useStudy } from '../context/StudyContext';
 import { useToast } from '../hooks/useToast';
 import { qaAPI } from '../api/client';
-import { answerQuestionFromText } from '../utils/aiEngine';
+import { answerQuestionFromText, splitIntoSemanticChunks, buildVectorIndex, normalizeDocumentText } from '../utils/aiEngine';
 
 export default function QAPage() {
   const { docId } = useParams();
@@ -96,6 +96,7 @@ export default function QAPage() {
 
     const currentQuestion = question.trim();
     setQuestion('');
+    setLoading(true);
 
     // Add user message immediately
     const userMsg = { sender: 'user', text: currentQuestion, timestamp: new Date().toISOString() };
@@ -105,43 +106,66 @@ export default function QAPage() {
       return updated;
     });
 
-    // ── Get document content (fetch if opened on another laptop) ────────
-    let doc = documents.find(d => d.id === selectedDocId) || activeDocument;
-    let docContent = doc?.content || '';
+    try {
+      // ── Get document content (fetch if opened on another laptop) ────────
+      let doc = documents.find(d => d.id === selectedDocId) || activeDocument;
+      let docContent = doc?.content || '';
 
-    if (!docContent || docContent.trim().length < 10) {
-      docContent = await ensureDocumentContent(selectedDocId);
-    }
-
-    if (!docContent || docContent.trim().length < 10) {
-      const anyWithContent = documents.find(d => d.content && d.content.trim().length > 20);
-      if (anyWithContent) {
-        docContent = anyWithContent.content;
-        doc = anyWithContent;
+      if (!docContent || docContent.trim().length < 10) {
+        docContent = await ensureDocumentContent(selectedDocId);
+        // Re-fetch doc with updated content
+        doc = documents.find(d => d.id === selectedDocId) || doc;
       }
+
+      if (!docContent || docContent.trim().length < 10) {
+        const anyWithContent = documents.find(d => d.content && d.content.trim().length > 20);
+        if (anyWithContent) {
+          docContent = anyWithContent.content;
+          doc = anyWithContent;
+        }
+      }
+
+      // ── FIX: Use cached vector_index from doc; rebuild if missing ────────
+      // The backend re-fetch strips vector_index (it only lives in localStorage).
+      // If vector_index is null, build it fresh from doc.content so answers use
+      // the real document instead of the old fallback.
+      let vectorIndex = doc?.vector_index || null;
+      if ((!vectorIndex || !vectorIndex.chunks || vectorIndex.chunks.length === 0) && docContent && docContent.trim().length > 20) {
+        const normalized = normalizeDocumentText(docContent);
+        const chunks = splitIntoSemanticChunks(normalized, selectedDocId);
+        vectorIndex = buildVectorIndex(chunks, selectedDocId);
+      }
+
+      const result = answerQuestionFromText(currentQuestion, docContent, vectorIndex);
+      const aiMsg = {
+        sender: 'ai',
+        text: result.answer,
+        confidence: result.confidence,
+        source: result.source_passage,
+        page_number: result.page_number,
+        section_name: result.section_name,
+        relevance_score: result.relevance_score,
+        timestamp: new Date().toISOString()
+      };
+      setChatHistory(prev => {
+        const updated = [...prev, aiMsg];
+        localStorage.setItem(`qa_history_${selectedDocId}`, JSON.stringify(updated));
+        return updated;
+      });
+
+      if (result.confidence > 0) {
+        addToast('Answered from notes! +5 XP', 'success');
+      }
+
+      // Sync to backend in background
+      qaAPI.ask(selectedDocId, currentQuestion).catch(() => {});
+    } catch (err) {
+      console.error('Q&A processing error:', err);
+      const errMsg = { sender: 'ai', text: 'An error occurred while processing your question. Please try again.', confidence: 0, timestamp: new Date().toISOString() };
+      setChatHistory(prev => [...prev, errMsg]);
+    } finally {
+      setLoading(false);
     }
-
-    const vectorIndex = doc?.vector_index || null;
-    const result = answerQuestionFromText(currentQuestion, docContent, vectorIndex);
-    const aiMsg = {
-      sender: 'ai',
-      text: result.answer,
-      confidence: result.confidence,
-      source: result.source_passage,
-      page_number: result.page_number,
-      section_name: result.section_name,
-      relevance_score: result.relevance_score,
-      timestamp: new Date().toISOString()
-    };
-    setChatHistory(prev => {
-      const updated = [...prev, aiMsg];
-      localStorage.setItem(`qa_history_${selectedDocId}`, JSON.stringify(updated));
-      return updated;
-    });
-    addToast('Answered from notes! +5 XP', 'success');
-
-    // Sync to backend in background
-    qaAPI.ask(selectedDocId, currentQuestion).catch(() => {});
   };
 
 
@@ -335,6 +359,25 @@ export default function QAPage() {
                   </div>
                 ))}
 
+                {/* Thinking indicator while AI processes */}
+                {loading && (
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', width: '100%' }}>
+                    <div style={{
+                      padding: '16px 20px',
+                      borderRadius: '16px',
+                      background: 'rgba(255, 255, 255, 0.03)',
+                      border: '1px solid rgba(255, 255, 255, 0.08)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '10px',
+                      color: 'rgba(240,240,255,0.6)',
+                      fontSize: '0.9rem'
+                    }}>
+                      <div style={{ width: '18px', height: '18px', border: '2px solid rgba(108,99,255,0.2)', borderTopColor: '#6c63ff', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
+                      Searching your document...
+                    </div>
+                  </div>
+                )}
                 <div ref={chatEndRef} />
               </>
             )}
