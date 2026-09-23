@@ -5,7 +5,7 @@ import Sidebar from '../components/Sidebar';
 import { useStudy } from '../context/StudyContext';
 import { useToast } from '../hooks/useToast';
 import { documentsAPI } from '../api/client';
-import { extractTextFromPdfFile } from '../utils/aiEngine';
+import { extractTextFromPdfFile, ingestAndIndexDocument } from '../utils/aiEngine';
 
 export default function UploadPage() {
   const [activeTab, setActiveTab] = useState('file'); // 'file' | 'paste'
@@ -41,8 +41,8 @@ export default function UploadPage() {
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       const selectedFile = e.dataTransfer.files[0];
       const extension = selectedFile.name.split('.').pop().toLowerCase();
-      if (extension !== 'pdf' && extension !== 'txt') {
-        addToast("Only PDF and TXT files are supported.", "error");
+      if (extension !== 'pdf' && extension !== 'txt' && extension !== 'docx') {
+        addToast("Supported formats: PDF, TXT, and DOCX.", "error");
         return;
       }
       setFile(selectedFile);
@@ -84,7 +84,7 @@ export default function UploadPage() {
       if (fileExt === 'pdf') {
         setStatusMessage("Extracting all pages of PDF...");
         const pdfResult = await extractTextFromPdfFile(file, (p) => {
-          setUploadProgress(15 + Math.round(p * 0.5));
+          setUploadProgress(15 + Math.round(p * 0.4));
         });
         if (pdfResult && pdfResult.text) {
           extractedText = pdfResult.text;
@@ -96,6 +96,20 @@ export default function UploadPage() {
         } catch (err) {
           console.warn("TXT read notice:", err);
         }
+      } else if (fileExt === 'docx') {
+        try {
+          const arrayBuffer = await file.arrayBuffer();
+          const decoder = new TextDecoder('utf-8', { fatal: false });
+          const textContent = decoder.decode(arrayBuffer);
+          const matches = textContent.match(/<w:t[\s>][^<]*<\/w:t>/g);
+          if (matches && matches.length > 0) {
+            extractedText = matches.map(m => m.replace(/<[^>]+>/g, '')).join(' ').trim();
+          } else {
+            extractedText = textContent.replace(/<[^>]+>/g, ' ').replace(/[^\x20-\x7E\n]/g, ' ').replace(/\s+/g, ' ').trim();
+          }
+        } catch (err) {
+          console.warn("DOCX read notice:", err);
+        }
       }
     }
 
@@ -103,19 +117,27 @@ export default function UploadPage() {
       extractedText = `Notes for ${docTitle}`;
     }
 
-    const wordCount = extractedText.split(/\s+/).filter(Boolean).length;
+    setStatusMessage("Normalizing text & generating 500-1000 token semantic chunks...");
+    setUploadProgress(65);
 
-    setStatusMessage("Indexing notes for Q&A, Quizzes, and Flashcards...");
+    const docId = 'doc-' + Date.now();
+
+    setStatusMessage("Building vector embeddings & inverted search index...");
     setUploadProgress(85);
+
+    // Ingest, clean, chunk into 500-1000 tokens, and build TF-IDF vector index
+    const indexedDoc = ingestAndIndexDocument(extractedText, docId, docTitle, totalPagesCount);
 
     // 2. Save document locally immediately
     const localDoc = {
-      id: 'doc-' + Date.now(),
+      id: docId,
       title: docTitle,
       content: extractedText,
-      word_count: wordCount,
+      word_count: indexedDoc.word_count,
       num_pages: totalPagesCount,
       file_type: fileExt,
+      vector_index: indexedDoc.vector_index,
+      chunks: indexedDoc.chunks,
       created_at: new Date().toISOString()
     };
 
@@ -191,7 +213,7 @@ export default function UploadPage() {
                 transition: 'all 0.3s'
               }}
             >
-              📤 File Upload (PDF / TXT)
+              📤 File Upload (PDF / TXT / DOCX)
             </button>
             <button
               onClick={() => { setActiveTab('paste'); setFile(null); }}
@@ -258,7 +280,7 @@ export default function UploadPage() {
                     <input
                       type="file"
                       id="fileInput"
-                      accept=".pdf,.txt"
+                      accept=".pdf,.txt,.docx"
                       onChange={handleFileChange}
                       style={{ display: 'none' }}
                     />
@@ -278,7 +300,7 @@ export default function UploadPage() {
                           Drag & drop notes file here, or browse
                         </div>
                         <div style={{ fontSize: '0.8rem', color: 'rgba(240,240,255,0.4)' }}>
-                          Supports PDF, TXT (Max 16MB)
+                          Supports PDF, TXT, DOCX (Max 16MB)
                         </div>
                       </div>
                     )}

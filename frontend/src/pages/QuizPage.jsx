@@ -137,7 +137,9 @@ export default function QuizPage() {
         user_answer: userAnswers[idx] || "Unanswered",
         correct_answer: q.correct_answer,
         is_correct: userAnswers[idx] === q.correct_answer,
-        explanation: q.explanation
+        explanation: q.explanation,
+        bloom_level: q.bloom_level || 'Conceptual Analysis',
+        page_citation: q.page_citation || ''
       }))
     };
 
@@ -297,6 +299,39 @@ export default function QuizPage() {
 
               {/* Question Box */}
               <div className="glass-card" style={{ padding: '32px', borderRadius: '24px' }}>
+                <div style={{ display: 'flex', gap: '8px', marginBottom: '14px', flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span style={{
+                    background: 'rgba(108, 99, 255, 0.15)',
+                    color: '#6c63ff',
+                    padding: '4px 10px',
+                    borderRadius: '8px',
+                    fontSize: '0.8rem',
+                    fontWeight: 700
+                  }}>
+                    🎯 {quizData?.questions?.[currentQIndex]?.bloom_level || 'Conceptual Analysis'}
+                  </span>
+                  {quizData?.questions?.[currentQIndex]?.page_citation && (
+                    <span style={{
+                      background: 'rgba(62, 207, 207, 0.15)',
+                      color: '#3ecfcf',
+                      padding: '4px 10px',
+                      borderRadius: '8px',
+                      fontSize: '0.8rem',
+                      fontWeight: 600
+                    }}>
+                      📄 {quizData?.questions?.[currentQIndex]?.page_citation}
+                    </span>
+                  )}
+                  <span style={{
+                    background: 'rgba(255, 255, 255, 0.05)',
+                    color: 'rgba(240, 240, 255, 0.6)',
+                    padding: '4px 10px',
+                    borderRadius: '8px',
+                    fontSize: '0.8rem'
+                  }}>
+                    🎓 Exam-Level MCQ
+                  </span>
+                </div>
                 <h2 style={{ fontSize: '1.35rem', fontWeight: 700, lineHeight: 1.5 }}>
                   {quizData?.questions?.[currentQIndex]?.question || "Multiple Choice Question"}
                 </h2>
@@ -432,6 +467,18 @@ export default function QuizPage() {
                       </summary>
 
                       <div style={{ marginTop: '16px', paddingLeft: '36px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                          {q.bloom_level && (
+                            <span style={{ background: 'rgba(108, 99, 255, 0.15)', color: '#6c63ff', padding: '2px 8px', borderRadius: '6px', fontSize: '0.75rem', fontWeight: 600 }}>
+                              🎯 {q.bloom_level}
+                            </span>
+                          )}
+                          {q.page_citation && (
+                            <span style={{ background: 'rgba(62, 207, 207, 0.15)', color: '#3ecfcf', padding: '2px 8px', borderRadius: '6px', fontSize: '0.75rem', fontWeight: 600 }}>
+                              📄 {q.page_citation}
+                            </span>
+                          )}
+                        </div>
                         <div style={{ fontSize: '0.95rem', fontWeight: 'bold' }}>{q.question}</div>
                         
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.9rem' }}>

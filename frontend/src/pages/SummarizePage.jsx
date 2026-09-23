@@ -9,7 +9,7 @@ import { summarizeTextContent } from '../utils/aiEngine';
 
 export default function SummarizePage() {
   const { docId } = useParams();
-  const { documents, activeDocument, setActiveDocument, loadDocuments } = useStudy();
+  const { documents, activeDocument, setActiveDocument, loadDocuments, ensureDocumentContent } = useStudy();
   const { addToast } = useToast();
 
   const [selectedDocId, setSelectedDocId] = useState('');
@@ -34,18 +34,29 @@ export default function SummarizePage() {
 
   const loadSummary = async (id, forceRegen = false) => {
     const targetId = id || selectedDocId;
-    const doc = documents.find(d => d.id === targetId) || activeDocument || documents[0];
-    const docContent = doc?.content || "";
+    let doc = documents.find(d => d.id === targetId) || activeDocument || documents[0];
+    let docContent = doc?.content || "";
 
-    // Generate summary instantly with 0 delay
-    const localSummary = summarizeTextContent(docContent, 6);
+    if (!docContent || docContent.trim().length < 10) {
+      docContent = await ensureDocumentContent(targetId);
+    }
+
+    if (!docContent || docContent.trim().length < 10) {
+      const anyWithContent = documents.find(d => d.content && d.content.trim().length > 20);
+      if (anyWithContent) {
+        docContent = anyWithContent.content;
+      }
+    }
+
+    // Generate structured summary instantly
+    const localSummary = summarizeTextContent(docContent, 8);
     setSummaryData(localSummary);
     setLoading(false);
 
     if (targetId) {
       summarizeAPI.summarize(targetId, { force: forceRegen }).then(res => {
         if (res.data?.success && res.data?.data) {
-          setSummaryData(res.data.data);
+          setSummaryData(prev => ({ ...prev, ...res.data.data }));
         }
       }).catch(() => {});
     }
@@ -63,10 +74,19 @@ export default function SummarizePage() {
   };
 
   const handleCopy = () => {
-    if (!summaryData || !summaryData.summary_bullets) return;
-    const bulletText = summaryData.summary_bullets.map(b => `• ${b}`).join('\n');
-    navigator.clipboard.writeText(bulletText);
-    addToast("Summary copied to clipboard!", "success");
+    if (!summaryData) return;
+    let textToCopy = '';
+    if (summaryData.executive_summary) {
+      textToCopy += `EXECUTIVE OVERVIEW:\n${summaryData.executive_summary}\n\n`;
+    }
+    if (summaryData.summary_bullets && summaryData.summary_bullets.length > 0) {
+      textToCopy += `KEY TAKEAWAYS:\n` + summaryData.summary_bullets.map(b => `• ${b}`).join('\n') + '\n\n';
+    }
+    if (summaryData.section_breakdowns && summaryData.section_breakdowns.length > 0) {
+      textToCopy += `SECTION BREAKDOWNS:\n` + summaryData.section_breakdowns.map(s => `${s.section} (Page ${s.page}):\n${s.summary}`).join('\n\n');
+    }
+    navigator.clipboard.writeText(textToCopy.trim());
+    addToast("Full structured summary copied to clipboard!", "success");
   };
 
   const selectedDoc = documents.find(d => d.id === selectedDocId);
@@ -179,12 +199,25 @@ export default function SummarizePage() {
                 </div>
               </div>
 
+              {/* Executive Overview Card */}
+              {summaryData.executive_summary && (
+                <div className="glass-card" style={{ padding: '32px 40px', borderRadius: '24px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '16px' }}>
+                    <span style={{ fontSize: '1.4rem' }}>💡</span>
+                    <h3 style={{ fontSize: '1.25rem', fontWeight: 700 }}>Executive Overview</h3>
+                  </div>
+                  <p style={{ fontSize: '1.05rem', lineHeight: 1.7, color: 'rgba(240,240,255,0.9)', margin: 0 }}>
+                    {summaryData.executive_summary}
+                  </p>
+                </div>
+              )}
+
               {/* Summary bullets card */}
               <div className="glass-card" style={{ padding: '40px', borderRadius: '24px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '32px' }}>
                   <h3 style={{ fontSize: '1.25rem', fontWeight: 700 }}>Key Takeaways</h3>
                   <div style={{ display: 'flex', gap: '10px' }}>
-                    <button onClick={handleCopy} className="btn btn-secondary btn-sm">📋 Copy to Clipboard</button>
+                    <button onClick={handleCopy} className="btn btn-secondary btn-sm">📋 Copy Full Summary</button>
                     <button onClick={() => loadSummary(selectedDocId, true)} className="btn btn-secondary btn-sm">🔄 Regenerate</button>
                   </div>
                 </div>
@@ -222,6 +255,43 @@ export default function SummarizePage() {
                   )}
                 </ul>
               </div>
+
+              {/* Section-by-Section Breakdown */}
+              {summaryData.section_breakdowns && summaryData.section_breakdowns.length > 0 && (
+                <div className="glass-card" style={{ padding: '40px', borderRadius: '24px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '24px' }}>
+                    <span style={{ fontSize: '1.4rem' }}>📑</span>
+                    <h3 style={{ fontSize: '1.25rem', fontWeight: 700 }}>Section-by-Section Breakdown</h3>
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                    {summaryData.section_breakdowns.map((sec, idx) => (
+                      <div
+                        key={idx}
+                        style={{
+                          background: 'rgba(255,255,255,0.02)',
+                          border: '1px solid rgba(255,255,255,0.06)',
+                          borderRadius: '16px',
+                          padding: '20px 24px',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '8px'
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span style={{ fontWeight: 700, color: '#3ecfcf', fontSize: '1rem' }}>{sec.section}</span>
+                          <span style={{ fontSize: '0.8rem', background: 'rgba(255,255,255,0.05)', color: 'rgba(240,240,255,0.6)', padding: '2px 8px', borderRadius: '6px' }}>
+                            Page {sec.page}
+                          </span>
+                        </div>
+                        <p style={{ color: 'rgba(240,240,255,0.85)', fontSize: '0.95rem', lineHeight: 1.6, margin: 0 }}>
+                          {sec.summary}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
             </div>
           ) : (

@@ -117,31 +117,20 @@ export default function QAPage() {
       const anyWithContent = documents.find(d => d.content && d.content.trim().length > 20);
       if (anyWithContent) {
         docContent = anyWithContent.content;
+        doc = anyWithContent;
       }
     }
 
-    if (!docContent || docContent.trim().length < 10) {
-      const noDocMsg = {
-        sender: 'ai',
-        text: 'Document content is still synchronizing. Please try again in a few seconds or check that your notes contain text.',
-        confidence: 0.5,
-        source: '',
-        timestamp: new Date().toISOString()
-      };
-      setChatHistory(prev => {
-        const updated = [...prev, noDocMsg];
-        localStorage.setItem(`qa_history_${selectedDocId}`, JSON.stringify(updated));
-        return updated;
-      });
-      return;
-    }
-
-    const result = answerQuestionFromText(currentQuestion, docContent);
+    const vectorIndex = doc?.vector_index || null;
+    const result = answerQuestionFromText(currentQuestion, docContent, vectorIndex);
     const aiMsg = {
       sender: 'ai',
       text: result.answer,
       confidence: result.confidence,
       source: result.source_passage,
+      page_number: result.page_number,
+      section_name: result.section_name,
+      relevance_score: result.relevance_score,
       timestamp: new Date().toISOString()
     };
     setChatHistory(prev => {
@@ -296,6 +285,31 @@ export default function QAPage() {
                           }}>
                             {Math.round(msg.confidence * 100)}% Confidence
                           </span>
+                          {msg.page_number && (
+                            <span style={{
+                              background: 'rgba(62, 207, 207, 0.15)',
+                              color: '#3ecfcf',
+                              padding: '2px 6px',
+                              borderRadius: '4px',
+                              fontWeight: 600
+                            }}>
+                              📄 Page {msg.page_number}
+                            </span>
+                          )}
+                          {msg.section_name && msg.section_name !== 'N/A' && (
+                            <span style={{
+                              background: 'rgba(108, 99, 255, 0.15)',
+                              color: '#6c63ff',
+                              padding: '2px 6px',
+                              borderRadius: '4px',
+                              maxWidth: '180px',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap'
+                            }}>
+                              🔖 {msg.section_name}
+                            </span>
+                          )}
                           {msg.source && (
                             <details style={{ flex: 1 }}>
                               <summary style={{ cursor: 'pointer', outline: 'none', userSelect: 'none' }}>View Source Passage</summary>

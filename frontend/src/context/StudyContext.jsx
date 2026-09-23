@@ -62,6 +62,8 @@ export function StudyProvider({ children }) {
             ...d,
             content: existing?.content || d.content || '',
             num_pages: existing?.num_pages || d.num_pages || 1,
+            vector_index: existing?.vector_index || d.vector_index || null,
+            chunks: existing?.chunks || d.chunks || null,
           });
         });
         const mergedList = Array.from(mergedMap.values());
